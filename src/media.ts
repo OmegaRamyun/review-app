@@ -3,7 +3,9 @@
 // UrlSource and the <video> element both read through it with Range requests,
 // so only the bytes actually needed ever cross into the webview.
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ALL_FORMATS, BufferTarget, Conversion, Input, Output, UrlSource, WavOutputFormat } from "mediabunny";
+import {
+  ALL_FORMATS, BufferTarget, CanvasSink, Conversion, Input, Output, UrlSource, WavOutputFormat,
+} from "mediabunny";
 
 export function mediaUrl(absPath: string): string {
   return convertFileSrc(absPath, "media");
@@ -90,4 +92,45 @@ export async function extractMicWav(
   const buf = (output.target as BufferTarget).buffer;
   if (!buf) throw new Error("mic extraction produced no data");
   return buf;
+}
+
+/** Screenshot JPEG quality, per DESIGN.md. */
+export const SHOT_QUALITY = 0.85;
+
+async function canvasToJpeg(canvas: HTMLCanvasElement | OffscreenCanvas): Promise<Blob> {
+  if ("convertToBlob" in canvas) return canvas.convertToBlob({ type: "image/jpeg", quality: SHOT_QUALITY });
+  return new Promise((resolve, reject) =>
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob returned null"))), "image/jpeg", SHOT_QUALITY),
+  );
+}
+
+/**
+ * Grab the frame at the video's current time as a JPEG, full source resolution.
+ * Primary: canvas drawImage(video) → toBlob (the <video> is crossOrigin
+ * "anonymous" and the media scheme sends ACAO *, so the canvas is not tainted).
+ * Fallback (no decoded frame yet, tainted canvas, or a blank draw): decode the
+ * frame with Mediabunny from the original file at the same timestamp.
+ */
+export async function grabFrame(
+  video: HTMLVideoElement,
+  input: Input | null,
+): Promise<{ blob: Blob; time: number; via: "video" | "mediabunny" }> {
+  const time = video.currentTime;
+  if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
+    try {
+      const c = document.createElement("canvas");
+      c.width = video.videoWidth;
+      c.height = video.videoHeight;
+      c.getContext("2d")!.drawImage(video, 0, 0);
+      return { blob: await canvasToJpeg(c), time, via: "video" };
+    } catch {
+      // fall through to Mediabunny
+    }
+  }
+  if (!input) throw new Error("no decoded video frame and no Mediabunny input to fall back on");
+  const track = await input.getPrimaryVideoTrack();
+  if (!track) throw new Error("recording has no video track");
+  const wrapped = await new CanvasSink(track, { poolSize: 0 }).getCanvas(time);
+  if (!wrapped) throw new Error(`no video frame at ${time.toFixed(2)} s`);
+  return { blob: await canvasToJpeg(wrapped.canvas), time: wrapped.timestamp, via: "mediabunny" };
 }

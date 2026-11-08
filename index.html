@@ -64,10 +64,44 @@
               <option value="1.5">1.5×</option><option value="2">2×</option>
             </select>
             <span id="v-time">0:00</span>
+            <button id="v-shot" title="Grab the current frame into the point being composed">Screenshot</button>
           </div>
           <p id="v-error" class="error"></p>
         </div>
         <ol id="lines" class="lines"></ol>
+
+        <!-- point composer -->
+        <div class="composer-box">
+          <p id="c-empty" class="hint">Pin a transcript line (📌) to start a point.</p>
+          <form id="composer" hidden>
+            <div class="c-quote"><button type="button" id="c-time" class="linkish" title="Jump to this moment"></button> <q id="c-quote"></q></div>
+            <textarea id="c-text" rows="3" placeholder="Your point…"></textarea>
+            <div class="c-row">
+              <label>Bucket <select id="c-bucket"></select></label>
+              <button type="button" id="c-shot">Screenshot current frame</button>
+              <button type="button" id="c-shot-clear" hidden>Remove screenshot</button>
+            </div>
+            <img id="c-thumb" class="thumb" alt="screenshot" hidden />
+            <div class="c-row">
+              <button type="submit" id="c-save">Save point</button>
+              <button type="button" id="c-cancel">Cancel</button>
+              <span id="c-status"></span>
+            </div>
+          </form>
+        </div>
+
+        <!-- points list -->
+        <div class="points">
+          <div class="p-bar">
+            <label>Mode <select id="s-mode">
+              <option value="full">Full (14 buckets)</option>
+              <option value="rapid">Rapid / demo day (6)</option>
+            </select></label>
+            <label>Filter <select id="p-filter"></select></label>
+            <span id="p-count"></span>
+          </div>
+          <ol id="p-list" class="p-list"></ol>
+        </div>
       </div>
     </section>
 

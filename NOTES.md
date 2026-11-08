@@ -23,7 +23,7 @@ FileReader or whole-file-in-memory over IPC?
    `Range: bytes=N-` and re-requests when a 206 ends early), and the scrubber's
    `<video>` gets the same URL as `src` (the media stack makes its own Range
    requests). Only the mic-track extract crosses IPC: one ~35 MB 16 kHz mono
-   WAV per 18-min chunk, sent as a raw `invoke` body to `save_audio_chunk`,
+   WAV per 18-min chunk, sent as a raw `invoke` body to `save_session_bytes`,
    which writes it into the session folder. Rust then reads it from disk to
    upload to Deepgram.
 
@@ -130,6 +130,82 @@ installer). WebView2 ships with Windows 11.
   and keeps completed chunks.
 - Mic-track choice is remembered in localStorage (one setup). If the user later
   needs per-OBS-setup memory, key it by track layout.
-- Mode is fixed to "full" in session.json until U2 adds the rapid/full toggle.
+- Mode was fixed to "full" in U1; U2 adds the full/rapid toggle (Scrub screen, saved to session.json).
 - No Library screen yet (U5): past sessions are on disk but not re-openable in
   the UI.
+
+## U2: points, buckets, screenshots
+
+**What it does (Scrub & point screen):**
+
+- Each transcript line has a 📌 button. Pinning opens the point composer with
+  the quoted line and its timestamp, a text field, the bucket picker and a
+  screenshot button. Save writes the point. Lines with a point get a red
+  left border.
+- **Buckets** (`src/points.ts`): 14 full-mode buckets and 6 rapid-mode
+  buckets, labels verbatim from DESIGN.md; a unit test asserts both lists. Rapid
+  buckets have their own ids (`rapid-feel` = 3Cs + juice, which is not full
+  mode's Game Feel/Juice). The **Mode** select (full / rapid) sits above the
+  points list and is saved to `session.json`. Switching modes keeps every point;
+  points from the other mode keep their bucket and show "(rapid)" in the label.
+  No scores anywhere.
+- **Points list**: filter by bucket (counts shown), click the timestamp to jump,
+  click the thumbnail to jump to the screenshot's frame, Edit (loads the point
+  into the composer: change text/bucket/screenshot), Delete (second click
+  confirms; the point's JPEG is deleted too).
+- **Screenshots**: `grabFrame` in `src/media.ts`. Primary path: canvas
+  `drawImage(video)` at the source resolution, then `toBlob` JPEG 0.85. Fallback:
+  Mediabunny `CanvasSink.getCanvas(currentTime)` on the original file, used when
+  there is no decoded frame or the canvas is tainted. The `<video>` is now
+  `crossOrigin="anonymous"` so the canvas stays clean (the media scheme already
+  sends `ACAO: *`). If the webview refuses the CORS-mode load, the player
+  silently reloads without `crossOrigin` and screenshots use the Mediabunny
+  path. A grab stays in memory until Save, so a cancelled point leaves no
+  orphan file. The transport bar's Screenshot button grabs into the open
+  composer, or starts a point on the line playing now.
+- **Persistence**, in the session folder: `points.json`
+  (`{version, next, points:[{id, bucket, quote, time, text, screenshot,
+  shot_time, order}]}`) and `shot-<pointId>-<ms>.jpg`. `screenshot` is a file
+  name relative to the session folder, not an absolute path, so the folder stays
+  movable. `order` is the creation order and is never reused (`next` survives
+  deletes). Pinned-line marking matches `point.time` to the line's start time.
+- **Rust**: `save_audio_chunk` is renamed to `save_session_bytes` (generic raw
+  body; WAVs and JPEGs). New: `load_session_bytes` (raw `ipc::Response` →
+  Blob URL thumbnails) and `delete_session_file`. All of them go through the
+  same id/name validation. No new dependencies.
+
+**Verified here:** `bash ops/check.sh` passes. `npm run test:unit` passes 10/10
+(5 new in `points.test.mjs`: bucket lists, create/edit/delete order, filter +
+pinned, parse round-trip/damage, file names). `cargo test` passes 10/10. In
+headless Chromium 1248, a cross-origin Range server serving
+`test-media/obs-layout-test.mkv` with `ACAO: *`, a scratch page calling
+`grabFrame`: the canvas path gave a 1280×720 JPEG (25,972 B) at 7.3 s with an
+untainted canvas, and the forced Mediabunny fallback gave the same 1280×720
+frame (25,972 B).
+
+**Known limits:** there is no Library yet, so points are reloaded only for the
+session you just transcribed (re-opening past sessions is U5). Pinned-line
+marks depend on the line grouping staying the same as when the point was made.
+
+## What Cade must verify on Windows (U2)
+
+1. **Pin + save:** on the Scrub screen, click 📌 on a line, type a point, pick
+   a bucket, Save. The point appears in the list and the line gets a red left
+   border. `%APPDATA%\app.reviewapp.desktop\sessions\<id>\points.json`
+   contains it.
+2. **Screenshot (WebView2 + RX580):** pause on a frame and click Screenshot. The
+   composer status should say `via video`. If it says `via mediabunny`, the
+   canvas was tainted or the frame wasn't ready. That still works, but tell
+   me. Open the `shot-*.jpg` in the session folder: it should be 1280×720, the
+   right frame, and not black. A black or green JPEG from the canvas path on the
+   AMD hardware-decoded video is the main thing to look for.
+3. **Video still plays with `crossOrigin` set:** if playback broke compared to
+   U1, or the screenshot is always `via mediabunny`, WebView2 refused the
+   CORS-mode load of `http://media.localhost` and the reload fallback kicked in.
+4. **Edit / delete:** edit a point's text, bucket and screenshot (replace and
+   remove), then delete a point. The old JPEGs should disappear from the session
+   folder and `points.json` should match the list.
+5. **Filter / jump / mode:** filter by bucket and check the counts. Click a
+   point's timestamp and the video should land on the quoted words. Switch Mode
+   to Rapid: the picker shows the 6 rapid buckets, the existing full-mode points
+   stay listed, and `session.json` shows `"mode": "rapid"`.

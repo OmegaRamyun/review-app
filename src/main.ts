@@ -2,7 +2,11 @@
 // addressed by absolute path (drag-drop) and read through the `media` scheme.
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { extractMicWav, mediaUrl, probe, type Probe } from "./media";
+import { extractMicWav, grabFrame, mediaUrl, probe, type Probe } from "./media";
+import {
+  bucketLabel, bucketsFor, deletePoint, emptyPoints, filterPoints, newPoint, parsePoints, pinnedTimes,
+  shotName, updatePoint, type Mode, type Point, type PointsFile,
+} from "./points";
 import {
   chunkRanges, costCents, defaultMicTrack, fmtTime, groupLines, lineAt, type Line, type Word,
 } from "./transcript";
@@ -14,7 +18,7 @@ interface Session {
   title: string;
   recording_path: string;
   date: string;
-  mode: "full" | "rapid";
+  mode: Mode;
   mic_track: number;
 }
 
@@ -164,7 +168,7 @@ async function runTranscription() {
         bar.value = (i + x * 0.5) / ranges.length;
       });
       status.textContent = `Uploading + transcribing — ${part}`;
-      const audioPath = await invoke<string>("save_audio_chunk", new Uint8Array(wav), {
+      const audioPath = await invoke<string>("save_session_bytes", new Uint8Array(wav), {
         headers: { "x-session": s.id, "x-name": `mic-${String(i).padStart(3, "0")}.wav` },
       });
       const words = await invoke<Word[]>("transcribe_chunk", { audioPath, model: tr.model, offsetS: r.start });
@@ -185,7 +189,7 @@ async function runTranscription() {
   $("t-next").hidden = false;
 }
 $("t-next").addEventListener("click", () => {
-  if (session && transcript) openScrub(session.recording_path, transcript.words);
+  if (session && transcript) void openScrub(session.recording_path, transcript.words);
 });
 
 // ---------- 3. Scrub & point ----------
@@ -220,14 +224,22 @@ function onFrame(_now: DOMHighResTimeStamp, meta: VideoFrameCallbackMetadata) {
   video.requestVideoFrameCallback(onFrame);
 }
 
-function openScrub(path: string, words: Word[]) {
+async function openScrub(path: string, words: Word[]) {
   lines = groupLines(words);
   const list = $("lines");
-  lineEls = lines.map((l) => {
+  lineEls = lines.map((l, i) => {
     const li = document.createElement("li");
     const time = document.createElement("time");
     time.textContent = fmtTime(l.start);
-    li.append(time, l.text);
+    const pin = document.createElement("button");
+    pin.className = "pin";
+    pin.textContent = "📌";
+    pin.title = "Pin this line as a point";
+    pin.addEventListener("click", (e) => {
+      e.stopPropagation();
+      startNewPoint(i);
+    });
+    li.append(pin, time, l.text);
     li.addEventListener("click", async () => {
       // word.start of the line's first word, exactly
       await seekTo(words[l.firstWord].start);
@@ -238,12 +250,334 @@ function openScrub(path: string, words: Word[]) {
   list.replaceChildren(...lineEls);
   active = -1;
   $("v-error").textContent = "";
+  corsRetried = false;
+  // crossOrigin so drawImage(video) leaves the canvas untainted (media scheme sends ACAO *).
+  video.crossOrigin = "anonymous";
   video.src = mediaUrl(path);
   video.requestVideoFrameCallback(onFrame);
+  await loadPoints();
   show("scrub");
 }
 
+// ---------- 3b. Points ----------
+let points: PointsFile = emptyPoints();
+const thumbUrls = new Map<string, string>(); // screenshot file name → blob URL
+type DraftShot = { kind: "existing"; name: string; time: number | null } | { kind: "new"; blob: Blob; time: number };
+interface Draft { id: string | null; quote: string; time: number; shot: DraftShot | null }
+let draft: Draft | null = null;
+let draftThumbUrl: string | null = null;
+let lastBucket = "";
+
+const sessionId = () => session!.id;
+const mode = (): Mode => session?.mode ?? "full";
+
+async function loadPoints() {
+  for (const u of thumbUrls.values()) URL.revokeObjectURL(u);
+  thumbUrls.clear();
+  closeComposer();
+  try {
+    points = parsePoints(await invoke<string | null>("load_session_file", { id: sessionId(), name: "points.json" }));
+  } catch (e) {
+    points = emptyPoints();
+    $("v-error").textContent = `Could not read points.json: ${String(e)}`;
+  }
+  $<HTMLSelectElement>("s-mode").value = mode();
+  renderBuckets();
+  renderPoints();
+}
+
+async function savePoints() {
+  await invoke("save_session_file", { id: sessionId(), name: "points.json", contents: JSON.stringify(points, null, 2) });
+}
+
+function option(value: string, label: string): HTMLOptionElement {
+  const o = document.createElement("option");
+  o.value = value;
+  o.textContent = label;
+  return o;
+}
+
+/** Bucket picker = the current mode's buckets (plus the edited point's own bucket if it is from the other mode). */
+function renderBuckets() {
+  const sel = $<HTMLSelectElement>("c-bucket");
+  const opts = bucketsFor(mode()).map((b) => option(b.id, b.label));
+  const own = draft?.id ? points.points.find((p) => p.id === draft!.id)?.bucket : undefined;
+  if (own && !bucketsFor(mode()).some((b) => b.id === own)) opts.push(option(own, bucketLabel(own)));
+  const keep = sel.value;
+  sel.replaceChildren(...opts);
+  sel.value = own ?? (opts.some((o) => o.value === keep) ? keep : lastBucket);
+  if (!sel.value) sel.selectedIndex = 0;
+
+  const filter = $<HTMLSelectElement>("p-filter");
+  const prev = filter.value;
+  const ids = bucketsFor(mode()).map((b) => b.id);
+  for (const p of points.points) if (!ids.includes(p.bucket)) ids.push(p.bucket);
+  filter.replaceChildren(option("", "All buckets"), ...ids.map((id) => {
+    const n = points.points.filter((p) => p.bucket === id).length;
+    return option(id, `${bucketLabel(id)}${n ? ` (${n})` : ""}`);
+  }));
+  filter.value = ids.includes(prev) ? prev : "";
+}
+
+async function thumbUrl(name: string): Promise<string> {
+  let u = thumbUrls.get(name);
+  if (!u) {
+    const bytes = await invoke<ArrayBuffer>("load_session_bytes", { id: sessionId(), name });
+    u = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+    thumbUrls.set(name, u);
+  }
+  return u;
+}
+
+function markPinned() {
+  const pinned = pinnedTimes(points.points);
+  lines.forEach((l, i) => lineEls[i]?.classList.toggle("pinned", pinned.has(l.start)));
+}
+
+function renderPoints() {
+  markPinned();
+  const shown = filterPoints(points.points, $<HTMLSelectElement>("p-filter").value);
+  $("p-count").textContent = `${shown.length} of ${points.points.length} point${points.points.length === 1 ? "" : "s"}`;
+  $("p-list").replaceChildren(...shown.map(pointItem));
+}
+
+function pointItem(p: Point): HTMLLIElement {
+  const li = document.createElement("li");
+  li.classList.toggle("editing", draft?.id === p.id);
+  const body = document.createElement("div");
+  const meta = document.createElement("div");
+  meta.className = "p-meta";
+  const jump = document.createElement("button");
+  jump.className = "linkish";
+  jump.textContent = fmtTime(p.time);
+  jump.title = "Jump to this point's timestamp";
+  jump.addEventListener("click", () => void seekTo(p.time));
+  const bucket = document.createElement("span");
+  bucket.className = "p-bucket";
+  bucket.textContent = bucketLabel(p.bucket);
+  meta.append(`#${p.order} · `, jump, " · ", bucket);
+  const text = document.createElement("div");
+  text.textContent = p.text || "(no text yet)";
+  const quote = document.createElement("q");
+  quote.textContent = p.quote;
+  body.append(meta, text, quote);
+  if (p.screenshot) {
+    const img = document.createElement("img");
+    img.className = "thumb";
+    img.alt = "screenshot";
+    img.title = "Jump to the screenshot's frame";
+    img.addEventListener("click", () => void seekTo(p.shot_time ?? p.time));
+    thumbUrl(p.screenshot).then((u) => (img.src = u), () => (img.alt = "screenshot missing"));
+    body.append(img);
+  }
+  const actions = document.createElement("div");
+  actions.className = "p-actions";
+  const edit = document.createElement("button");
+  edit.textContent = "Edit";
+  edit.addEventListener("click", () => editPoint(p));
+  const del = document.createElement("button");
+  del.textContent = "Delete";
+  del.addEventListener("click", () => {
+    if (del.dataset.armed) void removePoint(p);
+    else {
+      del.dataset.armed = "1";
+      del.textContent = "Really delete?";
+      setTimeout(() => {
+        delete del.dataset.armed;
+        del.textContent = "Delete";
+      }, 3000);
+    }
+  });
+  actions.append(edit, del);
+  li.append(body, actions);
+  return li;
+}
+
+/** Show `src` in the composer. `owned` = a fresh blob URL of an unsaved grab (revoked on replace); otherwise it belongs to thumbUrls. */
+function setDraftThumb(src: string | null, owned = false) {
+  if (draftThumbUrl) URL.revokeObjectURL(draftThumbUrl);
+  draftThumbUrl = owned ? src : null;
+  const img = $<HTMLImageElement>("c-thumb");
+  img.hidden = !src;
+  if (src) img.src = src;
+  else img.removeAttribute("src");
+  $("c-shot-clear").hidden = !src;
+}
+
+function openComposer(d: Draft, text: string) {
+  draft = d;
+  $("c-empty").hidden = true;
+  $("composer").hidden = false;
+  $("c-time").textContent = fmtTime(d.time);
+  $("c-quote").textContent = d.quote;
+  $<HTMLTextAreaElement>("c-text").value = text;
+  $("c-status").textContent = "";
+  $<HTMLButtonElement>("c-save").textContent = d.id ? "Save changes" : "Save point";
+  renderBuckets();
+  setDraftThumb(null);
+  const shot = d.shot;
+  if (shot?.kind === "existing") {
+    void thumbUrl(shot.name).then((u) => draft?.shot === shot && setDraftThumb(u), () => {});
+  }
+  renderPoints();
+  $<HTMLTextAreaElement>("c-text").focus();
+}
+
+function closeComposer() {
+  draft = null;
+  setDraftThumb(null);
+  $("composer").hidden = true;
+  $("c-empty").hidden = false;
+}
+
+function startNewPoint(lineIndex: number) {
+  const l = lines[lineIndex];
+  if (!l) return;
+  openComposer({ id: null, quote: l.text, time: l.start, shot: null }, "");
+}
+
+function editPoint(p: Point) {
+  openComposer({
+    id: p.id, quote: p.quote, time: p.time,
+    shot: p.screenshot ? { kind: "existing", name: p.screenshot, time: p.shot_time } : null,
+  }, p.text);
+  $<HTMLSelectElement>("c-bucket").value = p.bucket;
+}
+
+async function grabIntoDraft() {
+  if (!draft) {
+    // Screenshot with no point open: start one on the line playing now.
+    const i = lineAt(lines, video.currentTime);
+    if (i < 0) {
+      $("v-error").textContent = "Pin a transcript line first — the screenshot goes into that point.";
+      return;
+    }
+    startNewPoint(i);
+  }
+  const status = $("c-status");
+  status.textContent = "Grabbing frame…";
+  try {
+    const { blob, time, via } = await grabFrame(video, probed?.input ?? null);
+    if (!draft) return;
+    draft.shot = { kind: "new", blob, time };
+    setDraftThumb(URL.createObjectURL(blob), true);
+    status.textContent = `Frame at ${fmtTime(time)} (${(blob.size / 1024).toFixed(0)} KB, via ${via}) — saved with the point.`;
+  } catch (e) {
+    status.textContent = `Screenshot failed: ${String(e)}`;
+  }
+}
+
+async function writeShot(pointId: string, blob: Blob): Promise<string> {
+  const name = shotName(pointId);
+  await invoke("save_session_bytes", new Uint8Array(await blob.arrayBuffer()), {
+    headers: { "x-session": sessionId(), "x-name": name },
+  });
+  return name;
+}
+
+async function deleteShot(name: string) {
+  await invoke("delete_session_file", { id: sessionId(), name }).catch(() => {});
+  const u = thumbUrls.get(name);
+  if (u) URL.revokeObjectURL(u);
+  thumbUrls.delete(name);
+}
+
+async function saveDraft() {
+  if (!draft) return;
+  const d = draft;
+  const bucket = $<HTMLSelectElement>("c-bucket").value;
+  const text = $<HTMLTextAreaElement>("c-text").value.trim();
+  const status = $("c-status");
+  status.textContent = "Saving…";
+  try {
+    if (d.id) {
+      const p = points.points.find((x) => x.id === d.id);
+      if (!p) throw new Error("point no longer exists");
+      const old = p.screenshot;
+      let screenshot = old, shot_time = p.shot_time;
+      if (d.shot?.kind === "new") {
+        screenshot = await writeShot(p.id, d.shot.blob);
+        shot_time = d.shot.time;
+      } else if (!d.shot) {
+        screenshot = null;
+        shot_time = null;
+      }
+      updatePoint(points, p.id, { bucket, text, screenshot, shot_time });
+      await savePoints();
+      if (old && old !== screenshot) await deleteShot(old);
+    } else {
+      const p = newPoint(points, { bucket, quote: d.quote, time: d.time, text, screenshot: null, shot_time: null });
+      if (d.shot?.kind === "new") {
+        try {
+          updatePoint(points, p.id, { screenshot: await writeShot(p.id, d.shot.blob), shot_time: d.shot.time });
+        } catch (e) {
+          deletePoint(points, p.id);
+          throw e;
+        }
+      }
+      await savePoints();
+    }
+  } catch (e) {
+    status.textContent = `Save failed: ${String(e)}`;
+    return;
+  }
+  lastBucket = bucket;
+  closeComposer();
+  renderBuckets();
+  renderPoints();
+}
+
+async function removePoint(p: Point) {
+  deletePoint(points, p.id);
+  if (draft?.id === p.id) closeComposer();
+  try {
+    await savePoints();
+  } catch (e) {
+    $("v-error").textContent = `Could not save points.json: ${String(e)}`;
+  }
+  if (p.screenshot) await deleteShot(p.screenshot);
+  renderBuckets();
+  renderPoints();
+}
+
+$("composer").addEventListener("submit", (e) => {
+  e.preventDefault();
+  void saveDraft();
+});
+$("c-cancel").addEventListener("click", () => {
+  closeComposer();
+  renderPoints();
+});
+$("c-time").addEventListener("click", () => draft && void seekTo(draft.time));
+$("c-shot").addEventListener("click", () => void grabIntoDraft());
+$("v-shot").addEventListener("click", () => void grabIntoDraft());
+$("c-shot-clear").addEventListener("click", () => {
+  if (!draft) return;
+  draft.shot = null;
+  setDraftThumb(null);
+  $("c-status").textContent = "Screenshot removed (takes effect on save).";
+});
+$("p-filter").addEventListener("change", () => renderPoints());
+$<HTMLSelectElement>("s-mode").addEventListener("change", async (e) => {
+  if (!session) return;
+  session.mode = (e.target as HTMLSelectElement).value as Mode;
+  renderBuckets();
+  renderPoints();
+  await invoke("save_session_file", { id: session.id, name: "session.json", contents: JSON.stringify(session, null, 2) })
+    .catch((err) => ($("v-error").textContent = `Could not save session.json: ${String(err)}`));
+});
+
+let corsRetried = false;
 video.addEventListener("error", () => {
+  // If the webview refuses the CORS-mode load, play without crossOrigin; screenshots then
+  // fall back to Mediabunny frame decode (the canvas path would be tainted).
+  if (video.crossOrigin && !corsRetried && video.src) {
+    corsRetried = true;
+    const src = video.src;
+    video.removeAttribute("crossorigin");
+    video.src = src;
+    return;
+  }
   $("v-error").textContent =
     `The webview cannot play this file as-is (${video.error?.message || `code ${video.error?.code}`}). ` +
     "The MKV→MP4 remux fallback is not built yet.";

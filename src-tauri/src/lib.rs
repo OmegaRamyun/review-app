@@ -93,9 +93,10 @@ fn load_session_file(app: AppHandle, id: String, name: String) -> Result<Option<
     }
 }
 
-/// Raw-body IPC: `invoke("save_audio_chunk", bytes, { headers: { "x-session", "x-name" } })`.
+/// Raw-body IPC: `invoke("save_session_bytes", bytes, { headers: { "x-session", "x-name" } })`.
+/// Used for mic WAV chunks and point screenshots (JPEG).
 #[tauri::command]
-fn save_audio_chunk(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<String, String> {
+fn save_session_bytes(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<String, String> {
     let header = |k: &str| -> Result<String, String> {
         request
             .headers()
@@ -109,6 +110,26 @@ fn save_audio_chunk(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<
         return Err("expected raw binary body".into());
     };
     write_atomic(&session_file(&app, &id, &name)?, bytes)
+}
+
+/// Raw bytes back to the webview (screenshot thumbnails → Blob URL). Small
+/// files only; the recording itself is never read this way.
+#[tauri::command]
+fn load_session_bytes(app: AppHandle, id: String, name: String) -> Result<tauri::ipc::Response, String> {
+    std::fs::read(session_file(&app, &id, &name)?)
+        .map(tauri::ipc::Response::new)
+        .map_err(|e| e.to_string())
+}
+
+/// Remove one file from a session folder (a deleted point's screenshot).
+/// Missing is not an error.
+#[tauri::command]
+fn delete_session_file(app: AppHandle, id: String, name: String) -> Result<(), String> {
+    match std::fs::remove_file(session_file(&app, &id, &name)?) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 // ---------- Deepgram key (OS keychain) ----------
@@ -211,7 +232,9 @@ pub fn run() {
             open_media,
             save_session_file,
             load_session_file,
-            save_audio_chunk,
+            save_session_bytes,
+            load_session_bytes,
+            delete_session_file,
             set_deepgram_key,
             has_deepgram_key,
             clear_deepgram_key,
@@ -234,6 +257,7 @@ mod tests {
         }
         assert!(valid_name("mic-000.wav"));
         assert!(valid_name("transcript.json"));
+        assert!(valid_name("shot-p0007-1762600000000.jpg"));
         for bad in ["", ".hidden", "..", "../x", "a/b", "a\\b", "C:x", &"a".repeat(65)] {
             assert!(!valid_name(bad), "{bad:?}");
         }
