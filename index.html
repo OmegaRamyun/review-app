@@ -7,11 +7,70 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <main>
+    <header>
       <h1>Review App</h1>
-      <section id="drop" class="drop">Drop an OBS MKV here</section>
-      <pre id="info"></pre>
-    </main>
+      <details id="settings">
+        <summary>Settings</summary>
+        <label>Deepgram API key
+          <input id="dg-key" type="password" autocomplete="off" placeholder="paste once — stored in the OS keychain" />
+        </label>
+        <button id="dg-save">Save key</button>
+        <button id="dg-clear">Forget key</button>
+        <span id="dg-status"></span>
+        <label>Deepgram model <input id="dg-model" type="text" placeholder="nova-3" /></label>
+      </details>
+    </header>
+
+    <!-- 1. Import -->
+    <section id="screen-import" class="screen">
+      <div id="drop" class="drop">Drop an OBS MKV here</div>
+      <div id="import-info" hidden>
+        <table>
+          <tr><th>File</th><td id="i-name"></td></tr>
+          <tr><th>Path</th><td id="i-path"></td></tr>
+          <tr><th>Size</th><td id="i-size"></td></tr>
+          <tr><th>Duration</th><td id="i-dur"></td></tr>
+          <tr><th>Resolution</th><td id="i-res"></td></tr>
+        </table>
+        <fieldset>
+          <legend>Mic track (transcribed — nothing else is sent)</legend>
+          <div id="i-tracks"></div>
+        </fieldset>
+        <button id="b-transcribe">Transcribe</button>
+      </div>
+      <p id="import-error" class="error"></p>
+    </section>
+
+    <!-- 2. Transcribe -->
+    <section id="screen-transcribe" class="screen" hidden>
+      <progress id="t-bar" max="1" value="0"></progress>
+      <p id="t-status"></p>
+      <p id="t-error" class="error"></p>
+      <button id="t-retry" hidden>Retry</button>
+      <button id="t-next" hidden>Scrub &amp; point →</button>
+    </section>
+
+    <!-- 3. Scrub & point -->
+    <section id="screen-scrub" class="screen" hidden>
+      <div class="scrub">
+        <div class="player">
+          <video id="video" controls preload="metadata"></video>
+          <div class="transport">
+            <button id="v-back">−5s</button>
+            <button id="v-play">Play/Pause</button>
+            <button id="v-fwd">+5s</button>
+            <select id="v-speed">
+              <option value="0.5">0.5×</option><option value="1" selected>1×</option>
+              <option value="1.5">1.5×</option><option value="2">2×</option>
+            </select>
+            <span id="v-time">0:00</span>
+          </div>
+          <p id="v-error" class="error"></p>
+        </div>
+        <ol id="lines" class="lines"></ol>
+      </div>
+    </section>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

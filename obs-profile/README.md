@@ -11,7 +11,7 @@ The recording half of the Review App workflow. The app itself doesn't record —
 ## What it sets
 
 - **Video:** 1280×720, 30 fps. Low res on purpose — small files, and text/UI stays readable in screenshots.
-- **Encoder:** x264, CRF 20, `veryfast`, High profile, keyframe every 2 s. Works on any machine, no GPU needed. ~3–6 Mbps, roughly 25–45 MB per minute.
+- **Encoder:** AMD AMF H.264 (your RX580's hardware encoder), CQP 20, Quality preset, High profile, keyframe every 2 s, B-frames 0. GPU does the encoding, CPU stays free for the game. Files run a little bigger than x264 CRF 20 for the same look — fine, the recording is a working file for transcription and scrubbing, not the final product.
 - **Format:** MKV. Crash-safe, and it's the container the app reads. If OBS offers to remux to MP4, decline — the app wants the MKV.
 - **Audio:** 48 kHz stereo.
 - **Tracks:** two, and only two.
@@ -32,14 +32,14 @@ Set your mic level so normal speech peaks around −12 dB on the Mic/Aux meter �
 
 ## Check after import
 
-- **Mic device:** the profile uses the Windows default mic. If OBS picked the wrong one, set it in Settings → Audio → Mic/Auxiliary Audio (or the Mic source's properties). Talk and watch the Mic/Aux meter move.
+- **Encoder check:** open Settings → Output → Recording and confirm the encoder reads **AMD HW H.264**, Rate Control **CQP**, CQ **20**, Preset **Quality**, Profile **High**, keyframe **2 s**. If the AMD encoder doesn't appear in the list, update your Adrenalin drivers — AMF ships in the driver. If any of those values look different from what's here, set them by hand in that tab (10 seconds) and tell me — it means one of the profile's AMF keys didn't take, and I'll fix the file.
 - **Mono mic (optional but recommended):** in Edit → Advanced Audio Properties, tick **Mono** for Mic/Aux. That makes track 2 truly mono at record time. If it's unticked, nothing breaks — the app downmixes to mono when it extracts the track, so the clip Deepgram gets is mono either way. It just halves the audio bits.
 - **Game capture:** launch a game fullscreen and confirm the preview shows it. Game Capture grabs any fullscreen app automatically.
 - **A test recording:** hit Start Recording, play 30 seconds, stop. The file lands in your Videos folder as `YYYY-MM-DD HH-MM-SS.mkv`. Open it in the Review App and confirm track 2 is your voice.
 
-## If you have a GPU
+## If you don't have an AMD GPU
 
-The profile's x264 works everywhere. If you'd rather offload encoding, change the recording encoder in Settings → Output → Recording to NVENC (NVIDIA), AMF (AMD) or QuickSync (Intel) — same CRF/CQP 20, same tracks. Nothing else changes.
+The profile defaults to AMF because that's what this machine has (RX580). On a machine without AMD hardware, change the recording encoder in Settings → Output → Recording to NVENC (NVIDIA), QuickSync (Intel), or x264 (CPU fallback) — same CQP/CRF 20, same tracks. Nothing else changes.
 
 ## What the app does with the file
 
