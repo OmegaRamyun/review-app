@@ -1,4 +1,5 @@
 mod deepgram;
+mod gemini;
 mod media;
 
 use deepgram::Word;
@@ -9,6 +10,9 @@ use tauri::{AppHandle, Manager, State};
 
 const KEYRING_SERVICE: &str = "app.reviewapp.desktop";
 const KEYRING_USER_DEEPGRAM: &str = "deepgram";
+const KEYRING_USER_GEMINI: &str = "gemini";
+/// Upper bound on system + prompt sent to Gemini, in bytes.
+const GEMINI_MAX_INPUT_BYTES: usize = 200_000;
 
 // ---------- media ----------
 
@@ -132,36 +136,73 @@ fn delete_session_file(app: AppHandle, id: String, name: String) -> Result<(), S
     }
 }
 
-// ---------- Deepgram key (OS keychain) ----------
+// ---------- API keys (OS keychain) ----------
+// Keys are write-only from the webview: set / has / clear, never get.
 
-fn deepgram_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER_DEEPGRAM).map_err(|e| e.to_string())
+fn key_entry(user: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE, user).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-fn set_deepgram_key(key: String) -> Result<(), String> {
+fn set_key(user: &str, key: &str) -> Result<(), String> {
     let key = key.trim();
     if key.is_empty() {
         return Err("key is empty".into());
     }
-    deepgram_entry()?.set_password(key).map_err(|e| e.to_string())
+    key_entry(user)?.set_password(key).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-fn has_deepgram_key() -> Result<bool, String> {
-    match deepgram_entry()?.get_password() {
+fn has_key(user: &str) -> Result<bool, String> {
+    match key_entry(user)?.get_password() {
         Ok(_) => Ok(true),
         Err(keyring::Error::NoEntry) => Ok(false),
         Err(e) => Err(e.to_string()),
     }
 }
 
-#[tauri::command]
-fn clear_deepgram_key() -> Result<(), String> {
-    match deepgram_entry()?.delete_credential() {
+fn clear_key(user: &str) -> Result<(), String> {
+    match key_entry(user)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Read a key for a backend call; `label` names the service in the error.
+fn get_key(user: &str, label: &str) -> Result<String, String> {
+    match key_entry(user)?.get_password() {
+        Ok(k) => Ok(k),
+        Err(keyring::Error::NoEntry) => Err(format!("no {label} key set")),
+        Err(e) => Err(format!("keychain: {e}")),
+    }
+}
+
+#[tauri::command]
+fn set_deepgram_key(key: String) -> Result<(), String> {
+    set_key(KEYRING_USER_DEEPGRAM, &key)
+}
+
+#[tauri::command]
+fn has_deepgram_key() -> Result<bool, String> {
+    has_key(KEYRING_USER_DEEPGRAM)
+}
+
+#[tauri::command]
+fn clear_deepgram_key() -> Result<(), String> {
+    clear_key(KEYRING_USER_DEEPGRAM)
+}
+
+#[tauri::command]
+fn set_gemini_key(key: String) -> Result<(), String> {
+    set_key(KEYRING_USER_GEMINI, &key)
+}
+
+#[tauri::command]
+fn has_gemini_key() -> Result<bool, String> {
+    has_key(KEYRING_USER_GEMINI)
+}
+
+#[tauri::command]
+fn clear_gemini_key() -> Result<(), String> {
+    clear_key(KEYRING_USER_GEMINI)
 }
 
 // ---------- transcription ----------
@@ -180,11 +221,7 @@ async fn transcribe_chunk(
         if !audio.starts_with(&root) || !audio.is_file() {
             return Err("audio_path must be a file inside the sessions directory".into());
         }
-        let key = match deepgram_entry()?.get_password() {
-            Ok(k) => k,
-            Err(keyring::Error::NoEntry) => return Err("no Deepgram key set".into()),
-            Err(e) => return Err(format!("keychain: {e}")),
-        };
+        let key = get_key(KEYRING_USER_DEEPGRAM, "Deepgram")?;
         let bytes = std::fs::read(&audio).map_err(|e| format!("audio file: {e}"))?;
         let mut words = deepgram::send(deepgram::API_BASE, &key, bytes, &model)?;
         for w in &mut words {
@@ -192,6 +229,30 @@ async fn transcribe_chunk(
             w.end += offset_s;
         }
         Ok(words)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------- Gemini drafting ----------
+
+fn check_gemini_input(system: &str, prompt: &str) -> Result<(), String> {
+    let n = system.len() + prompt.len();
+    if n > GEMINI_MAX_INPUT_BYTES {
+        return Err(format!(
+            "prompt too large: {n} bytes (limit {GEMINI_MAX_INPUT_BYTES})"
+        ));
+    }
+    Ok(())
+}
+
+/// Returns the model's raw text (a JSON string; the frontend parses it).
+#[tauri::command]
+async fn gemini_draft(model: String, system: String, prompt: String) -> Result<String, String> {
+    check_gemini_input(&system, &prompt)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let key = get_key(KEYRING_USER_GEMINI, "Gemini")?;
+        gemini::send(gemini::API_BASE, &key, &model, &system, &prompt)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -238,7 +299,11 @@ pub fn run() {
             set_deepgram_key,
             has_deepgram_key,
             clear_deepgram_key,
-            transcribe_chunk
+            transcribe_chunk,
+            set_gemini_key,
+            has_gemini_key,
+            clear_gemini_key,
+            gemini_draft
         ])
         .run(tauri::generate_context!())
         .expect("error while running Review App");
@@ -261,6 +326,15 @@ mod tests {
         for bad in ["", ".hidden", "..", "../x", "a/b", "a\\b", "C:x", &"a".repeat(65)] {
             assert!(!valid_name(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn gemini_input_cap() {
+        assert!(check_gemini_input("s", "p").is_ok());
+        let half = "a".repeat(GEMINI_MAX_INPUT_BYTES / 2);
+        assert!(check_gemini_input(&half, &half).is_ok());
+        let e = check_gemini_input(&half, &format!("{half}x")).unwrap_err();
+        assert!(e.contains("too large"), "{e}");
     }
 
     #[test]

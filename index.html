@@ -18,6 +18,14 @@
         <button id="dg-clear">Forget key</button>
         <span id="dg-status"></span>
         <label>Deepgram model <input id="dg-model" type="text" placeholder="nova-3" /></label>
+        <hr />
+        <label>Gemini API key (AI draft on the Assemble screen — optional)
+          <input id="gm-key" type="password" autocomplete="off" placeholder="paste once — stored in the OS keychain" />
+        </label>
+        <button id="gm-save">Save key</button>
+        <button id="gm-clear">Forget key</button>
+        <span id="gm-status"></span>
+        <label>Gemini model <input id="gm-model" type="text" placeholder="gemini-2.5-flash" /></label>
       </details>
     </header>
 
@@ -99,9 +107,37 @@
             </select></label>
             <label>Filter <select id="p-filter"></select></label>
             <span id="p-count"></span>
+            <button id="b-assemble">Assemble →</button>
           </div>
           <ol id="p-list" class="p-list"></ol>
         </div>
+      </div>
+    </section>
+
+    <!-- 4. Assemble -->
+    <section id="screen-assemble" class="screen" hidden>
+      <div class="assemble">
+        <div class="a-editor">
+          <div class="a-bar">
+            <button id="a-back">← Scrub &amp; point</button>
+            <button id="a-draft" title="Send the buckets and points to Gemini; fills empty sections with draft prose you then edit">AI draft (Gemini)</button>
+            <span id="a-status"></span>
+          </div>
+          <fieldset class="a-settings">
+            <legend>Review settings</legend>
+            <label>Game title <input id="r-title" type="text" /></label>
+            <label>Mode <select id="r-mode">
+              <option value="full">Full review</option>
+              <option value="rapid">Rapid / demo day (no score)</option>
+            </select></label>
+            <label>Verdict <input id="r-verdict" type="text" placeholder="e.g. Wishlist it — the grapple alone is worth the hour" /></label>
+            <label>Who it's for <input id="r-who" type="text" placeholder="e.g. people who liked Celeste's assist mode" /></label>
+            <label id="r-score-row">Score (full mode only, optional) <input id="r-score" type="text" placeholder="e.g. 7/10" /></label>
+          </fieldset>
+          <p id="a-draft-warning" class="draft-warning" hidden></p>
+          <div id="a-sections"></div>
+        </div>
+        <iframe id="a-preview" class="a-preview" title="Styled page preview" sandbox="allow-same-origin"></iframe>
       </div>
     </section>
 

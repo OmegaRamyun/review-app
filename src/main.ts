@@ -10,6 +10,10 @@ import {
 import {
   chunkRanges, costCents, defaultMicTrack, fmtTime, groupLines, lineAt, type Line, type Word,
 } from "./transcript";
+import {
+  applyDraft, DRAFT_SYSTEM, draftPrompt, emptyReview, parseDraft, parseReview, pointsIn, renderPage,
+  sectionBuckets, unreviewedDrafts, type ReviewFile,
+} from "./review";
 
 interface MediaInfo { path: string; size_bytes: number }
 
@@ -32,6 +36,7 @@ interface TranscriptFile {
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const LS_MIC = "ra.micTrack";
 const LS_MODEL = "ra.deepgramModel";
+const LS_GEMINI_MODEL = "ra.geminiModel";
 
 // ---------- settings ----------
 const modelInput = $<HTMLInputElement>("dg-model");
@@ -61,9 +66,34 @@ $("dg-clear").addEventListener("click", async () => {
 });
 void refreshKeyStatus();
 
+// Gemini key (AI draft): same write-only keychain flow as Deepgram; optional, so the panel is not forced open.
+const geminiModelInput = $<HTMLInputElement>("gm-model");
+geminiModelInput.value = localStorage.getItem(LS_GEMINI_MODEL) ?? "";
+geminiModelInput.addEventListener("change", () => localStorage.setItem(LS_GEMINI_MODEL, geminiModelInput.value.trim()));
+async function refreshGeminiStatus() {
+  const has = await invoke<boolean>("has_gemini_key").catch(() => false);
+  $("gm-status").textContent = has ? "key stored in OS keychain" : "no key stored";
+}
+$("gm-save").addEventListener("click", async () => {
+  const el = $<HTMLInputElement>("gm-key");
+  try {
+    await invoke("set_gemini_key", { key: el.value });
+    el.value = "";
+  } catch (e) {
+    $("gm-status").textContent = String(e);
+    return;
+  }
+  void refreshGeminiStatus();
+});
+$("gm-clear").addEventListener("click", async () => {
+  await invoke("clear_gemini_key").catch(() => {});
+  void refreshGeminiStatus();
+});
+void refreshGeminiStatus();
+
 // ---------- screens ----------
-function show(name: "import" | "transcribe" | "scrub") {
-  for (const s of ["import", "transcribe", "scrub"]) $(`screen-${s}`).hidden = s !== name;
+function show(name: "import" | "transcribe" | "scrub" | "assemble") {
+  for (const s of ["import", "transcribe", "scrub", "assemble"]) $(`screen-${s}`).hidden = s !== name;
 }
 
 // ---------- 1. Import ----------
@@ -558,14 +588,26 @@ $("c-shot-clear").addEventListener("click", () => {
   $("c-status").textContent = "Screenshot removed (takes effect on save).";
 });
 $("p-filter").addEventListener("change", () => renderPoints());
-$<HTMLSelectElement>("s-mode").addEventListener("change", async (e) => {
+async function saveSession() {
   if (!session) return;
-  session.mode = (e.target as HTMLSelectElement).value as Mode;
+  await invoke("save_session_file", { id: session.id, name: "session.json", contents: JSON.stringify(session, null, 2) })
+    .catch((err) => {
+      $("v-error").textContent = `Could not save session.json: ${String(err)}`;
+      $("a-status").textContent = `Could not save session.json: ${String(err)}`;
+    });
+}
+/** Mode lives on the session and is shared by the Scrub and Assemble screens. */
+async function setMode(m: Mode) {
+  if (!session) return;
+  session.mode = m;
+  $<HTMLSelectElement>("s-mode").value = m;
+  $<HTMLSelectElement>("r-mode").value = m;
   renderBuckets();
   renderPoints();
-  await invoke("save_session_file", { id: session.id, name: "session.json", contents: JSON.stringify(session, null, 2) })
-    .catch((err) => ($("v-error").textContent = `Could not save session.json: ${String(err)}`));
-});
+  if (!$("screen-assemble").hidden) renderAssemble();
+  await saveSession();
+}
+$<HTMLSelectElement>("s-mode").addEventListener("change", (e) => void setMode((e.target as HTMLSelectElement).value as Mode));
 
 let corsRetried = false;
 video.addEventListener("error", () => {
@@ -587,4 +629,216 @@ $("v-back").addEventListener("click", () => void seekTo(Math.max(0, video.curren
 $("v-fwd").addEventListener("click", () => void seekTo(video.currentTime + 5));
 $<HTMLSelectElement>("v-speed").addEventListener("change", (e) => {
   video.playbackRate = Number((e.target as HTMLSelectElement).value);
+});
+
+// ---------- 4. Assemble ----------
+let review: ReviewFile = emptyReview();
+let reviewSaveTimer: number | undefined;
+let previewTimer: number | undefined;
+
+async function loadReview() {
+  try {
+    review = parseReview(await invoke<string | null>("load_session_file", { id: sessionId(), name: "review.json" }));
+  } catch (e) {
+    review = emptyReview();
+    $("a-status").textContent = `Could not read review.json: ${String(e)}`;
+  }
+}
+
+function writeReview() {
+  clearTimeout(reviewSaveTimer);
+  if (!session) return Promise.resolve();
+  return invoke("save_session_file", { id: sessionId(), name: "review.json", contents: JSON.stringify(review, null, 2) })
+    .then(() => {}, (e) => void ($("a-status").textContent = `Could not save review.json: ${String(e)}`));
+}
+function saveReviewSoon() {
+  clearTimeout(reviewSaveTimer);
+  reviewSaveTimer = window.setTimeout(() => void writeReview(), 400);
+}
+
+async function openAssemble() {
+  if (!session) return;
+  closeComposer();
+  await loadReview();
+  $<HTMLInputElement>("r-title").value = session.title;
+  $<HTMLSelectElement>("r-mode").value = session.mode;
+  $<HTMLInputElement>("r-verdict").value = review.verdict;
+  $<HTMLInputElement>("r-who").value = review.who_for;
+  $<HTMLInputElement>("r-score").value = review.score;
+  $("a-status").textContent = "";
+  renderAssemble();
+  show("assemble");
+}
+
+/** Editor sections: one per bucket that has points, prose field above its points. */
+function renderAssemble() {
+  $("r-score-row").hidden = mode() === "rapid"; // no scores in rapid mode (DESIGN.md)
+  const buckets = sectionBuckets(mode(), points.points);
+  const box = $("a-sections");
+  if (!buckets.length) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "No points yet — pin transcript lines on the Scrub & point screen; each bucket with points becomes a section here.";
+    box.replaceChildren(p);
+  } else {
+    box.replaceChildren(...buckets.map((b, i) => sectionEl(b, i)));
+  }
+  $<HTMLButtonElement>("a-draft").disabled = !buckets.length;
+  refreshDraftWarning();
+  renderPreviewSoon(0);
+}
+
+function sectionEl(bucket: string, i: number): HTMLElement {
+  const wrap = document.createElement("section");
+  wrap.className = "a-section";
+  const h = document.createElement("h3");
+  h.textContent = `${String(i + 1).padStart(2, "0")}. ${bucketLabel(bucket)}`;
+  const badge = document.createElement("span");
+  badge.className = "draft-badge";
+  badge.textContent = "AI DRAFT";
+  h.append(badge);
+  const ta = document.createElement("textarea");
+  ta.rows = 5;
+  ta.placeholder = "Write this section… (blank line = new paragraph)";
+  ta.value = review.sections[bucket]?.prose ?? "";
+  const draftRow = document.createElement("div");
+  draftRow.className = "draft-row";
+  const signOff = document.createElement("button");
+  signOff.type = "button";
+  signOff.textContent = "I've edited this — it's mine now";
+  draftRow.append("Draft text from Gemini. Edit it into your own words, then:", signOff);
+  const sync = () => {
+    const d = !!review.sections[bucket]?.draft && ta.value.trim() !== "";
+    wrap.classList.toggle("is-draft", d);
+    badge.hidden = !d;
+    draftRow.hidden = !d;
+  };
+  const changed = (delay?: number) => {
+    sync();
+    refreshDraftWarning();
+    saveReviewSoon();
+    renderPreviewSoon(delay);
+  };
+  ta.addEventListener("input", () => {
+    // Typing keeps the draft flag (one keystroke doesn't make AI prose the user's); sign-off clears it.
+    const wasDraft = review.sections[bucket]?.draft ?? false;
+    review.sections[bucket] = { prose: ta.value, draft: wasDraft && ta.value.trim() !== "" };
+    changed();
+  });
+  signOff.addEventListener("click", () => {
+    const s = review.sections[bucket];
+    if (s) s.draft = false;
+    changed(0);
+  });
+  sync();
+
+  const list = document.createElement("ol");
+  list.className = "a-points";
+  for (const p of pointsIn(points.points, bucket)) {
+    const li = document.createElement("li");
+    const t = document.createElement("time");
+    t.textContent = `[${fmtTime(p.time)}]`;
+    const body = document.createElement("div");
+    body.append(p.text || "(no text)");
+    if (p.quote) {
+      const q = document.createElement("q");
+      q.textContent = p.quote;
+      body.append(" ", q);
+    }
+    li.append(t, body);
+    if (p.screenshot) {
+      const img = document.createElement("img");
+      img.className = "thumb";
+      img.alt = "screenshot";
+      thumbUrl(p.screenshot).then((u) => (img.src = u), () => (img.alt = "screenshot missing"));
+      li.append(img);
+    }
+    list.append(li);
+  }
+  wrap.append(h, ta, draftRow, list);
+  return wrap;
+}
+
+function refreshDraftWarning() {
+  const n = unreviewedDrafts(review, sectionBuckets(mode(), points.points)).length;
+  const el = $("a-draft-warning");
+  el.hidden = n === 0;
+  el.textContent = `${n} section${n === 1 ? "" : "s"} still hold${n === 1 ? "s" : ""} unreviewed AI draft text (red dashed). ` +
+    "Nothing is published automatically; edit and sign off each one.";
+}
+
+/** Live preview: the styled page in a script-less iframe; scroll position survives re-renders. */
+function renderPreviewSoon(delay = 250) {
+  clearTimeout(previewTimer);
+  previewTimer = window.setTimeout(() => void renderPreview(), delay);
+}
+async function renderPreview() {
+  if (!session) return;
+  const shots = points.points.map((p) => p.screenshot).filter((n): n is string => !!n);
+  await Promise.all(shots.map((n) => thumbUrl(n).catch(() => null)));
+  const html = renderPage({
+    title: session.title, mode: mode(), review, points: points.points,
+    shotUrl: (n) => thumbUrls.get(n) ?? null, date: session.date,
+  });
+  const frame = $<HTMLIFrameElement>("a-preview");
+  const y = frame.contentWindow?.scrollY ?? 0;
+  frame.addEventListener("load", () => frame.contentWindow?.scrollTo(0, y), { once: true });
+  frame.srcdoc = html;
+}
+
+const bindSetting = (id: string, apply: (v: string) => void) =>
+  $<HTMLInputElement>(id).addEventListener("input", (e) => {
+    apply((e.target as HTMLInputElement).value);
+    saveReviewSoon();
+    renderPreviewSoon();
+  });
+bindSetting("r-verdict", (v) => (review.verdict = v));
+bindSetting("r-who", (v) => (review.who_for = v));
+bindSetting("r-score", (v) => (review.score = v));
+$<HTMLInputElement>("r-title").addEventListener("change", (e) => {
+  if (!session) return;
+  session.title = (e.target as HTMLInputElement).value.trim();
+  void saveSession();
+  renderPreviewSoon(0);
+});
+$<HTMLSelectElement>("r-mode").addEventListener("change", (e) => void setMode((e.target as HTMLSelectElement).value as Mode));
+
+$("b-assemble").addEventListener("click", () => void openAssemble());
+$("a-back").addEventListener("click", () => {
+  void writeReview();
+  renderBuckets();
+  renderPoints();
+  show("scrub");
+});
+
+// AI draft: buckets + points → Gemini (key stays in Rust) → DRAFT prose in empty / still-draft sections only.
+$("a-draft").addEventListener("click", async () => {
+  if (!session) return;
+  const status = $("a-status");
+  if (!(await invoke<boolean>("has_gemini_key").catch(() => false))) {
+    status.textContent = "Enter your Gemini API key in Settings first.";
+    $<HTMLDetailsElement>("settings").open = true;
+    return;
+  }
+  const buckets = sectionBuckets(mode(), points.points);
+  const btn = $<HTMLButtonElement>("a-draft");
+  btn.disabled = true;
+  const gmModel = geminiModelInput.value.trim() || "gemini-2.5-flash";
+  status.textContent = `Drafting with ${gmModel}…`;
+  try {
+    const prompt = draftPrompt(
+      { title: session.title, mode: mode(), verdict: review.verdict, who_for: review.who_for, points: points.points },
+      buckets,
+    );
+    const text = await invoke<string>("gemini_draft", { model: gmModel, system: DRAFT_SYSTEM, prompt });
+    const { filled, kept } = applyDraft(review, parseDraft(text, buckets));
+    await writeReview();
+    renderAssemble();
+    status.textContent = `Draft filled ${filled.length} section${filled.length === 1 ? "" : "s"}` +
+      (kept.length ? `; left ${kept.length} with your own prose untouched` : "") + ". It's a draft — edit it.";
+  } catch (e) {
+    status.textContent = `AI draft failed: ${String(e)}`;
+  } finally {
+    btn.disabled = false;
+  }
 });

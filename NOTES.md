@@ -209,3 +209,139 @@ marks depend on the line grouping staying the same as when the point was made.
    point's timestamp and the video should land on the quoted words. Switch Mode
    to Rapid: the picker shows the 6 rapid buckets, the existing full-mode points
    stay listed, and `session.json` shows `"mode": "rapid"`.
+
+## U3: Assemble stage + AI draft
+
+**What it does:** the Scrub screen has an **Assemble →** button. The Assemble
+screen has the editor on the left and a live preview on the right.
+
+- **Segmented editor:** there is one section for each bucket that has points.
+  Sections follow the current mode's bucket order; buckets from the other mode
+  come after them. Each section has a prose textarea above its points
+  (timestamp, note, quote, thumbnail). The logic is in `src/review.ts`
+  (`sectionBuckets`, `pointsIn`).
+- **Review settings:** game title (saved to `session.json`), mode full/rapid
+  (shared with the Scrub screen's Mode select, saved to `session.json`),
+  verdict wording, and a who-it's-for line. **Score** is optional free text and
+  appears in **full mode only**. In rapid mode the field is hidden, the score
+  is not rendered, and it is never sent to the AI (a test asserts this). A
+  score typed in full mode stays in `review.json` but is ignored while the
+  session is in rapid mode.
+- **Persistence:** `review.json` in the session folder:
+  `{version, verdict, who_for, score, sections:{<bucket>:{prose, draft}}, publish_state}`.
+  Writes are debounced (400 ms) and flushed when you go back to Scrub.
+  `publish_state` stays `"draft"` until U4.
+- **Live preview** (`renderPage` in `src/review.ts`): one self-contained HTML
+  document with no scripts and no external assets, shown in an
+  `<iframe sandbox="allow-same-origin" srcdoc>` (scripts are blocked; same
+  origin lets the blob-URL screenshots load). It re-renders 250 ms after
+  typing and keeps the scroll position. The style follows the HG101/GameFAQs
+  idiom with Neocities touches: an ASCII box banner, a numbered CONTENTS list,
+  `[01]` numbered section headers with `=-=-` rules, readable Georgia body
+  text, monospace "FIELD NOTES" with `[m:ss]` stamps, a tiled 8×8 pixel
+  checker background (a data-URI SVG, no image files), 88×31-style badges and
+  a hard-shadow page frame. U4 should reuse `renderPage` with `shotUrl`
+  mapping to relative file paths for export.
+- **AI draft (Gemini):** the "AI draft (Gemini)" button sends the section
+  buckets + points + verdict/who-for (`draftPrompt`) with a system instruction
+  (`DRAFT_SYSTEM`: HG101 voice, only use the notes, no invented facts, no
+  scores, JSON reply). The reply's prose goes into **empty sections, and
+  sections that still hold an unsigned draft, only**. Prose you wrote yourself
+  is never overwritten (`applyDraft`; tested). Draft sections are marked
+  everywhere:
+  - in the editor: a red dashed border, an "AI DRAFT" badge, and an
+    "I've edited this — it's mine now" sign-off button. Typing alone does
+    not clear the flag; sign-off does.
+  - above the editor: a warning with the count of unsigned sections.
+  - in the preview: a red dashed "AI DRAFT - NOT REVIEWED" box, plus a
+    page-top notice.
+
+  Nothing publishes automatically. U4 should refuse to export (or require an
+  explicit override) while `unreviewedDrafts()` is non-empty.
+
+### Model/key flow (settled)
+
+- **Key:** Settings → "Gemini API key" (optional; the settings panel does not
+  force open for it). Stored in the OS keychain: service
+  `app.reviewapp.desktop`, user `gemini`, alongside `deepgram`. It is
+  write-only from the webview: `set_gemini_key` / `has_gemini_key` /
+  `clear_gemini_key`, and the key never goes back to JS. The Deepgram key
+  commands now share the same helpers (`set_key`/`has_key`/`clear_key`/`get_key`
+  in `lib.rs`).
+- **Call:** `gemini_draft(model, system, prompt)` runs in Rust
+  (`src-tauri/src/gemini.rs`, the same ureq/rustls pattern as Deepgram, no new
+  deps). It sends `POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent`
+  with the key in the `x-goog-api-key` header (not in the URL), plus
+  `systemInstruction`, `responseMimeType: application/json` and temperature
+  0.7. Timeouts are 30 s connect / 120 s total. Input is capped at 200 KB.
+  Error strings carry the HTTP status and redact the key. A blocked prompt
+  (`promptFeedback.blockReason`) or an empty finish gets a plain message. The
+  frontend parses `{"sections":{<bucket id>: prose}}`, tolerates a ```json
+  fence, and drops unknown bucket ids.
+- **Model:** default `gemini-2.5-flash`, changeable in Settings (stored in
+  localStorage `ra.geminiModel`; an empty field uses the default). Flash is
+  enough for rewriting notes into prose and is cheap; a full review's prompt
+  is a few KB. If Google retires 2.5-flash or a newer Flash is better, change
+  the model field; no rebuild needed. (`DEFAULT_MODEL` in `gemini.rs` and the
+  fallback in `main.ts` only matter when the field is empty.)
+- **Privacy:** the only data sent is the title, mode, verdict, who-for and the
+  point notes/quotes. No audio, no screenshots, and no key outside the header.
+  This adds a network call that DESIGN.md's "Local-first" list doesn't name
+  (it lists Deepgram + Cloudflare). The AI-draft ruling covers it, and the
+  call is opt-in per click.
+
+**Verified here:** `bash ops/check.sh` passes. `npm run test:unit` passes
+17/17 (7 new in `review.test.mjs`: section order, review.json round-trip and
+damage tolerance, prompt contents and no score, draft parsing, never
+overwriting your own prose, HTML escaping + numbering + draft marks + no
+score in rapid mode, banner box width). `cargo test` passes 16/16 (gemini:
+URL building, response parsing incl. multi-part / SAFETY block / RECITATION /
+garbage, end-to-end against a mock server checking path, header, no key in
+the URL and body shape; 400/403 with the key echoed back are redacted; input
+cap). I rendered a sample page with `renderPage` and screenshotted it in
+headless Chromium: banner, contents, numbered sections, draft box and verdict
+box all render.
+
+**Not verified here:** a live Gemini call (no key on this box). The Assemble
+screen's DOM was typechecked and built, but not clicked through in a webview.
+The research report under `~/workspace/research_notes/…` is not readable by
+the `builder` user (permission denied), so the page style follows DESIGN.md's
+description only.
+
+**Known limits:** no Library yet, so Assemble works on the session you just
+transcribed (U5). Points can't be edited from the Assemble screen; go back to
+Scrub. The preview uses blob URLs for screenshots, and export (U4) must map
+them to files.
+
+## What Cade must verify on Windows (U3)
+
+1. **Assemble opens:** after pinning a few points in 2–3 buckets, click
+   **Assemble →**. You should see one section per bucket with points, in bucket
+   order, with points and thumbnails under each prose box. The preview on the
+   right shows the styled page with screenshots. If screenshots are broken in
+   the preview but fine in the editor, WebView2 is refusing blob URLs inside
+   the `srcdoc` iframe. Tell me.
+2. **Live preview:** type in a section, the verdict and the who-for line. The
+   preview updates within about ¼ s and keeps its scroll position. Check the
+   look at your normal window size: tiled background, ASCII banner, numbered
+   headers, badges.
+3. **Settings + mode:** switch Mode to Rapid. The Score field disappears and
+   the score vanishes from the preview, and the Scrub screen's Mode select
+   matches when you go back. Rename the title and check that `session.json`
+   updates. Check that `review.json` in the session folder has your prose.
+4. **Gemini key:** Settings → paste the Gemini key → Save. It should say
+   "key stored in OS keychain", and Credential Manager should show
+   `app.reviewapp.desktop` / `gemini`. It should survive a restart.
+5. **AI draft:** write your own prose in one section, leave the others empty,
+   then click **AI draft (Gemini)**. The empty sections fill with red-dashed
+   "AI DRAFT" prose, your section stays untouched, and the status line says
+   how many were filled/kept. The preview shows "AI DRAFT - NOT REVIEWED"
+   boxes. Click "I've edited this — it's mine now" on one. Its marks should
+   go away in the editor and the preview, and the warning count should drop.
+6. **Draft quality / model:** read the drafts. They should only restate your
+   notes, not invent mechanics. If `gemini-2.5-flash` errors with 404
+   (retired) or the prose is weak, put a different model id in Settings →
+   Gemini model and retry. Tell me which one works so the default can change.
+7. **Bad key:** set a bogus Gemini key and click AI draft. You should get a
+   plain "AI draft failed: Gemini HTTP 400/403 …" error with no key text,
+   and your prose should be unchanged.
