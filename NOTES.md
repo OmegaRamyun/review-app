@@ -345,3 +345,126 @@ them to files.
 7. **Bad key:** set a bogus Gemini key and click AI draft. You should get a
    plain "AI draft failed: Gemini HTTP 400/403 …" error with no key text,
    and your prose should be unchanged.
+
+## U4: Publish (Cloudflare Pages) + Itch comment
+
+**What it does:** Assemble has a **Publish →** button that opens the Publish
+screen. It has three steps; nothing happens unless you click.
+
+- **Draft gate:** while any section holds unsigned AI draft text, Export and
+  Publish are disabled. An "Export anyway" checkbox overrides this, and the
+  page then keeps its red AI DRAFT marks.
+- **1. Save files locally:** writes this review into the local **site folder**
+  `%APPDATA%\app.reviewapp.desktop\site\`:
+  - `index.html`: a front page listing every exported review, newest first.
+  - `<slug>/index.html`: this review, from `renderPage` with screenshots at
+    `shots/<name>`.
+  - `<slug>/shots/*.jpg`: copied from the session folder. Shots the page no
+    longer uses are pruned.
+  - `reviews.json`: the entry list. It stays local and is never uploaded.
+
+  The slug comes from the title, is made unique against other sessions, and is
+  saved in `review.json` on first export so the link doesn't change if you
+  rename the game. This folder is the **manual fallback**: drag it into the
+  Cloudflare dashboard's Pages upload.
+- **2. Publish to Cloudflare Pages:** the first click arms the button and
+  names the project; a second click within 5 s uploads. It re-exports first,
+  then uploads the **whole site folder** as a new production deployment.
+  Every deploy replaces the site, so every review has to be in each upload.
+  The flow is the same as `wrangler pages deploy`
+  (`src-tauri/src/cloudflare.rs`):
+  1. GET project → `subdomain` + `production_branch` (on 404 it creates the
+     project with `production_branch: main`).
+  2. GET `upload-token` (JWT).
+  3. `check-missing`, then `assets/upload` sends only the files the server
+     lacks (base64, batches of ≤40 MiB / 2000 files).
+  4. `upsert-hashes`.
+  5. Multipart `deployments` with `manifest` `{"/path": hash}` and
+     `branch` = the project's production branch.
+
+  Asset keys are wrangler's exact hash, `blake3(base64(bytes)+ext)[..32]`
+  (a wrong key is accepted silently and then 404s). The API token is used
+  for the account endpoints and the JWT for asset endpoints, both only in
+  `Authorization`; errors carry the HTTP status + Cloudflare
+  `code: message` with secrets redacted. After a successful publish,
+  `review.url = <site URL>/<slug>/` and `publish_state = "published"`.
+- **3. Itch comment:** `hook + "Verdict: <first sentence>" + "Full review: <url>"`.
+  - The hook is the first sentence of the Overview section's prose (falls
+    back to the first Overview point, then any prose).
+  - Before publishing, the link reads `[link — publish first]`. Publishing
+    fills it in: it regenerates the comment if you hadn't edited it, and
+    otherwise only swaps the placeholder.
+  - The comment is editable and saved in `review.json` (`itch_comment`).
+  - **Copy** uses `navigator.clipboard`, with an `execCommand("copy")`
+    fallback. **Regenerate** rebuilds the comment.
+  - Nothing is ever posted to Itch.
+- **Settings:**
+  - Cloudflare API token: OS keychain, user `cloudflare`, write-only like the
+    other keys.
+  - Account ID (32 hex), Pages project name, and an optional Site URL
+    override for a custom domain: stored in localStorage (not secrets).
+    Default site URL is `https://<project subdomain>` from the API.
+- **New dependency:** `blake3` (`pure` feature: Rust only, no C/asm build).
+  DESIGN.md's direct-upload ruling needs wrangler's hash, and hand-rolling
+  crypto was the worse option. No other new deps; base64 and multipart are a
+  few lines each.
+
+**Verified here:**
+- `bash ops/check.sh` passes.
+- `npm run test:unit` passes 23/23. The 6 new tests in `publish.test.mjs`
+  cover: slugify/unique slug/saved slug sticks, entries parse + upsert,
+  index escaping, site URL normalisation, the comment format + placeholder,
+  and the review.json publish fields.
+- `cargo test` passes 23/23. The 7 new tests: base64 vectors; hash pinned
+  to BLAKE3 (`blake3("")` vector); file collection skips
+  `reviews.json`/`*.tmp`; export writes, prunes and validates.
+- Against a **local mock Cloudflare API** (no real publish has ever run):
+  - full 6-call flow: auth per endpoint, only missing files uploaded,
+    manifest covers every path, branch = the project's `production_branch`;
+  - first-publish project creation;
+  - a 403 whose body echoes the token comes back redacted.
+
+**Not verified here:** a real Cloudflare upload (no token on this box, and
+the loop must never publish). The Publish screen's DOM was typechecked and
+built but not clicked through in a webview.
+
+**Known limits:**
+- Publishing does not poll the deployment until it goes live (wrangler polls
+  5×), so the link can take a minute.
+- There is no JWT refresh-on-expiry (wrangler re-fetches on 8000013). This
+  only matters for uploads over a few minutes; if it happens, just Publish
+  again: files already uploaded are skipped.
+- No retry on Cloudflare 8000000.
+- Re-publishing a review deletes nothing remotely except via the full-site
+  replace. To unpublish, remove its folder from `site\` and publish again.
+
+## What Cade must verify on Windows (U4)
+
+1. **Token setup:** create a Cloudflare API token with **Account ›
+   Cloudflare Pages › Edit**. Settings → paste it → Save token: it should
+   say "token stored in OS keychain", and Credential Manager should show
+   `app.reviewapp.desktop` / `cloudflare`. Fill in Account ID (dashboard
+   sidebar / URL) and a project name (e.g. `reviews`).
+2. **Draft gate:** with an unsigned AI draft section, Publish → Export and
+   Publish should be disabled until you tick "Export anyway" or sign the
+   section off.
+3. **Save files locally:** click it. The path should be shown. Open
+   `%APPDATA%\app.reviewapp.desktop\site\<slug>\index.html` in a browser:
+   the styled page with screenshots loading from `shots\`. The site's
+   `index.html` should list the review.
+4. **First real publish:** click Publish twice. On a new project name it
+   should create the project, then report "Published (deployment https://…)".
+   Open the link shown under it (`https://<project>.pages.dev/<slug>/`)
+   after a minute: the page and screenshots should load. If the screenshots
+   404 but the HTML loads, the asset hash doesn't match Cloudflare's. Tell me.
+5. **Second review:** publish another game. Both reviews and the front page
+   should stay live, and the status should say only a few new files were uploaded (the earlier review's files are skipped).
+6. **Errors:** try a wrong account ID or a token without Pages permission.
+   You should get a plain "Cloudflare … HTTP 403: 10000: Authentication
+   error" style message with no token text, and the local files should be
+   untouched.
+7. **Itch comment:** check the comment reads hook / verdict / link. Click
+   **Copy** and paste into Notepad. If Copy says it failed, WebView2 refused
+   both clipboard paths. Tell me.
+8. **Custom domain (optional):** set Site URL to your domain; the next
+   publish's link and comment should use it.

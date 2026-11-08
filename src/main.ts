@@ -14,6 +14,9 @@ import {
   applyDraft, DRAFT_SYSTEM, draftPrompt, emptyReview, parseDraft, parseReview, pointsIn, renderPage,
   sectionBuckets, unreviewedDrafts, type ReviewFile,
 } from "./review";
+import {
+  chooseSlug, hookLine, itchComment, normalizeSiteBase, parseSiteEntries, renderIndex, reviewUrl, upsertEntry,
+} from "./publish";
 
 interface MediaInfo { path: string; size_bytes: number }
 
@@ -37,6 +40,9 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 const LS_MIC = "ra.micTrack";
 const LS_MODEL = "ra.deepgramModel";
 const LS_GEMINI_MODEL = "ra.geminiModel";
+const LS_CF_ACCOUNT = "ra.cfAccount";
+const LS_CF_PROJECT = "ra.cfProject";
+const LS_CF_SITE = "ra.cfSite";
 
 // ---------- settings ----------
 const modelInput = $<HTMLInputElement>("dg-model");
@@ -92,8 +98,8 @@ $("gm-clear").addEventListener("click", async () => {
 void refreshGeminiStatus();
 
 // ---------- screens ----------
-function show(name: "import" | "transcribe" | "scrub" | "assemble") {
-  for (const s of ["import", "transcribe", "scrub", "assemble"]) $(`screen-${s}`).hidden = s !== name;
+function show(name: "import" | "transcribe" | "scrub" | "assemble" | "publish") {
+  for (const s of ["import", "transcribe", "scrub", "assemble", "publish"]) $(`screen-${s}`).hidden = s !== name;
 }
 
 // ---------- 1. Import ----------
@@ -842,3 +848,183 @@ $("a-draft").addEventListener("click", async () => {
     btn.disabled = false;
   }
 });
+
+// ---------- Cloudflare settings (token in the keychain; account/project/site URL are not secrets) ----------
+const cfInputs = { account: $<HTMLInputElement>("cf-account"), project: $<HTMLInputElement>("cf-project"), site: $<HTMLInputElement>("cf-site") };
+for (const [k, ls] of [["account", LS_CF_ACCOUNT], ["project", LS_CF_PROJECT], ["site", LS_CF_SITE]] as const) {
+  cfInputs[k].value = localStorage.getItem(ls) ?? "";
+  cfInputs[k].addEventListener("change", () => localStorage.setItem(ls, cfInputs[k].value.trim()));
+}
+async function refreshCfStatus() {
+  const has = await invoke<boolean>("has_cloudflare_key").catch(() => false);
+  $("cf-status").textContent = has ? "token stored in OS keychain" : "no token set";
+}
+$("cf-save").addEventListener("click", async () => {
+  const el = $<HTMLInputElement>("cf-key");
+  try {
+    await invoke("set_cloudflare_key", { key: el.value });
+    el.value = "";
+  } catch (e) {
+    $("cf-status").textContent = `could not store token: ${String(e)}`;
+    return;
+  }
+  void refreshCfStatus();
+});
+$("cf-clear").addEventListener("click", async () => {
+  await invoke("clear_cloudflare_key").catch(() => {});
+  void refreshCfStatus();
+});
+void refreshCfStatus();
+
+// ---------- 5. Publish ----------
+// Export = write the page into the local site folder. Publish = upload that folder to
+// Cloudflare Pages on an explicit double click. The Itch comment is copy-only.
+interface ExportResult { site_dir: string; review_dir: string }
+interface PublishResult { site_url: string; deployment_url: string; uploaded: number }
+
+const commentEl = $<HTMLTextAreaElement>("pb-comment");
+
+function publishDrafts(): number {
+  return unreviewedDrafts(review, sectionBuckets(mode(), points.points)).length;
+}
+
+function refreshPublishScreen() {
+  const n = publishDrafts();
+  const warn = $("pb-draft-warning");
+  warn.hidden = n === 0;
+  warn.textContent = `${n} section${n === 1 ? "" : "s"} still hold${n === 1 ? "s" : ""} unreviewed AI draft text. ` +
+    "Go back and sign them off, or tick the override to export with the draft marks showing.";
+  $("pb-override-row").hidden = n === 0;
+  const blocked = n > 0 && !$<HTMLInputElement>("pb-override").checked;
+  $<HTMLButtonElement>("pb-export").disabled = blocked;
+  $<HTMLButtonElement>("pb-publish").disabled = blocked;
+  $("pb-state").textContent = `state: ${review.publish_state}${review.slug ? ` · /${review.slug}/` : ""}`;
+  const a = $<HTMLAnchorElement>("pb-url");
+  a.textContent = review.url;
+  a.href = review.url || "#";
+}
+
+function generateComment(): string {
+  return itchComment({ hook: hookLine(review, points.points, mode()), verdict: review.verdict, url: review.url });
+}
+
+async function openPublish() {
+  if (!session) return;
+  await writeReview();
+  $<HTMLInputElement>("pb-override").checked = false;
+  for (const id of ["pb-export-status", "pb-publish-status", "pb-copy-status"]) $(id).textContent = "";
+  if (!review.itch_comment.trim()) review.itch_comment = generateComment();
+  commentEl.value = review.itch_comment;
+  refreshPublishScreen();
+  show("publish");
+}
+
+/** Render + write this review into the site folder. Returns the export paths. */
+async function exportReview(): Promise<ExportResult> {
+  const s = session!;
+  const entries = parseSiteEntries(await invoke<string | null>("load_site_entries"));
+  review.slug = chooseSlug(review.slug, s.title, s.id, entries);
+  const all = upsertEntry(entries, { slug: review.slug, session_id: s.id, title: s.title, date: s.date, mode: mode() });
+  const shots = [...new Set(points.points.map((p) => p.screenshot).filter((n): n is string => !!n))];
+  const html = renderPage({
+    title: s.title, mode: mode(), review, points: points.points,
+    shotUrl: (n) => `shots/${encodeURIComponent(n)}`, date: s.date,
+  });
+  const res = await invoke<ExportResult>("export_review", {
+    id: s.id, slug: review.slug, html, shots, indexHtml: renderIndex(all), entriesJson: JSON.stringify({ entries: all }, null, 2),
+  });
+  if (review.publish_state === "draft") review.publish_state = "exported";
+  await writeReview();
+  return res;
+}
+
+$("pb-export").addEventListener("click", async () => {
+  if (!session) return;
+  const btn = $<HTMLButtonElement>("pb-export"), status = $("pb-export-status");
+  btn.disabled = true;
+  status.textContent = "Exporting…";
+  try {
+    const res = await exportReview();
+    status.textContent = "Saved. This review's folder:";
+    $("pb-dir").textContent = `${res.review_dir}  (site folder: ${res.site_dir})`;
+  } catch (e) {
+    status.textContent = `Export failed: ${String(e)}`;
+  } finally {
+    refreshPublishScreen();
+  }
+});
+
+let publishArmed: number | undefined;
+$("pb-publish").addEventListener("click", async () => {
+  if (!session) return;
+  const btn = $<HTMLButtonElement>("pb-publish"), status = $("pb-publish-status");
+  const accountId = cfInputs.account.value.trim(), project = cfInputs.project.value.trim();
+  if (!accountId || !project || !(await invoke<boolean>("has_cloudflare_key").catch(() => false))) {
+    status.textContent = "Set the Cloudflare token, account ID and project name in Settings first (or use Save files locally).";
+    $<HTMLDetailsElement>("settings").open = true;
+    return;
+  }
+  // Two clicks: the first arms, the second uploads. Nothing goes out without both.
+  if (publishArmed === undefined) {
+    btn.textContent = `Click again to upload to “${project}”`;
+    publishArmed = window.setTimeout(() => {
+      publishArmed = undefined;
+      btn.textContent = "Publish to Cloudflare Pages";
+    }, 5000);
+    return;
+  }
+  clearTimeout(publishArmed);
+  publishArmed = undefined;
+  btn.textContent = "Publish to Cloudflare Pages";
+  btn.disabled = true;
+  try {
+    status.textContent = "Exporting…";
+    const exp = await exportReview();
+    $("pb-dir").textContent = `${exp.review_dir}  (site folder: ${exp.site_dir})`;
+    status.textContent = `Uploading the site folder to ${project}…`;
+    const res = await invoke<PublishResult>("publish_site", { accountId, project });
+    const base = normalizeSiteBase(cfInputs.site.value) || res.site_url;
+    const placeholder = review.itch_comment === "" || review.itch_comment === generateComment();
+    review.url = reviewUrl(base, review.slug);
+    review.publish_state = "published";
+    // Refresh the comment only if it was still the generated text (keeps the user's edits).
+    if (placeholder) review.itch_comment = generateComment();
+    else if (review.itch_comment.includes("[link — publish first]")) {
+      review.itch_comment = review.itch_comment.replace("[link — publish first]", review.url);
+    }
+    commentEl.value = review.itch_comment;
+    await writeReview();
+    status.textContent = `Published: ${res.uploaded} new file${res.uploaded === 1 ? "" : "s"} uploaded (deployment ${res.deployment_url}). ` +
+      "The live link can take a minute to update.";
+  } catch (e) {
+    status.textContent = `Publish failed: ${String(e)}. Your files are still in the local site folder.`;
+  } finally {
+    refreshPublishScreen();
+  }
+});
+
+commentEl.addEventListener("input", () => {
+  review.itch_comment = commentEl.value;
+  saveReviewSoon();
+});
+$("pb-regen").addEventListener("click", () => {
+  review.itch_comment = commentEl.value = generateComment();
+  saveReviewSoon();
+});
+$("pb-copy").addEventListener("click", async () => {
+  const status = $("pb-copy-status");
+  try {
+    await navigator.clipboard.writeText(commentEl.value);
+  } catch {
+    // Fallback for webviews that refuse the async clipboard API.
+    commentEl.select();
+    if (!document.execCommand("copy")) {
+      status.textContent = "Copy failed — select the text and press Ctrl+C.";
+      return;
+    }
+  }
+  status.textContent = "Copied. Paste it into the Itch comment box yourself.";
+});
+$("pb-override").addEventListener("change", () => refreshPublishScreen());
+$("a-publish").addEventListener("click", () => void openPublish());
+$("pb-back").addEventListener("click", () => void writeReview().then(() => openAssemble()));

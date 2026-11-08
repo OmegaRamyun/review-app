@@ -56,3 +56,8 @@ progress { width: 100%; }
 .a-points li { display: flex; gap: 0.5rem; align-items: flex-start; padding: 0.25rem 0; border-top: 1px dotted #ddd; }
 .a-points q { color: #555; font-style: italic; }
 .a-points .thumb { max-width: 6rem; max-height: 3.4rem; }
+.publish { max-width: 52rem; }
+.publish fieldset { margin: 0.8rem 0; background: #fff; }
+.publish textarea { width: 100%; box-sizing: border-box; font: 0.95rem/1.4 "Courier New", monospace; }
+.publish .path { word-break: break-all; font-size: 0.85rem; }
+.mono { font-family: "Courier New", monospace; }

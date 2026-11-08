@@ -26,6 +26,17 @@
         <button id="gm-clear">Forget key</button>
         <span id="gm-status"></span>
         <label>Gemini model <input id="gm-model" type="text" placeholder="gemini-2.5-flash" /></label>
+        <hr />
+        <label>Cloudflare API token (Publish — needs Account › Cloudflare Pages › Edit)
+          <input id="cf-key" type="password" autocomplete="off" placeholder="paste once — stored in the OS keychain" />
+        </label>
+        <button id="cf-save">Save token</button>
+        <button id="cf-clear">Forget token</button>
+        <span id="cf-status"></span>
+        <label>Cloudflare account ID <input id="cf-account" type="text" placeholder="32 hex chars, from the dashboard URL" /></label>
+        <label>Pages project name <input id="cf-project" type="text" placeholder="e.g. reviews (created on first publish if missing)" /></label>
+        <label>Site URL (optional — custom domain; default is the project's pages.dev address)
+          <input id="cf-site" type="text" placeholder="https://reviews.pages.dev" /></label>
       </details>
     </header>
 
@@ -120,6 +131,7 @@
         <div class="a-editor">
           <div class="a-bar">
             <button id="a-back">← Scrub &amp; point</button>
+            <button id="a-publish">Publish →</button>
             <button id="a-draft" title="Send the buckets and points to Gemini; fills empty sections with draft prose you then edit">AI draft (Gemini)</button>
             <span id="a-status"></span>
           </div>
@@ -138,6 +150,40 @@
           <div id="a-sections"></div>
         </div>
         <iframe id="a-preview" class="a-preview" title="Styled page preview" sandbox="allow-same-origin"></iframe>
+      </div>
+    </section>
+
+    <!-- 5. Publish -->
+    <section id="screen-publish" class="screen" hidden>
+      <div class="publish">
+        <div class="a-bar"><button id="pb-back">← Assemble</button> <span id="pb-state" class="mono"></span></div>
+        <p id="pb-draft-warning" class="draft-warning" hidden></p>
+        <label id="pb-override-row" hidden><input id="pb-override" type="checkbox" /> Export anyway — the page keeps its red "AI DRAFT" marks</label>
+        <fieldset>
+          <legend>1. Export the page</legend>
+          <p class="hint">Writes the styled page and its screenshots into the local site folder. That folder is what gets
+            published — or drag it into Cloudflare's dashboard (Workers &amp; Pages → your project → Create deployment) to upload by hand.</p>
+          <button id="pb-export">Save files locally</button>
+          <span id="pb-export-status"></span>
+          <p class="mono path"><span id="pb-dir"></span></p>
+        </fieldset>
+        <fieldset>
+          <legend>2. Publish to Cloudflare Pages</legend>
+          <p class="hint">Uploads the whole site folder (every exported review + the front page) as a new production
+            deployment of your Pages project. Only happens when you click — twice.</p>
+          <button id="pb-publish">Publish to Cloudflare Pages</button>
+          <span id="pb-publish-status"></span>
+          <p class="mono"><a id="pb-url" target="_blank" rel="noopener"></a></p>
+        </fieldset>
+        <fieldset>
+          <legend>3. Itch comment (paste it yourself — the app never posts)</legend>
+          <textarea id="pb-comment" rows="7"></textarea>
+          <div class="c-row">
+            <button id="pb-copy">Copy</button>
+            <button id="pb-regen" title="Rebuild from the overview, verdict and link (replaces your edits)">Regenerate</button>
+            <span id="pb-copy-status"></span>
+          </div>
+        </fieldset>
       </div>
     </section>
 

@@ -18,6 +18,10 @@ percent-encoding = "2"
 # Blocking HTTP client for the Deepgram upload: rustls + ring (no OpenSSL,
 # no aws-lc-sys/cmake), webpki-roots baked in. Runs inside spawn_blocking.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# Cloudflare Pages direct upload (DESIGN.md: Publish via the direct-upload API):
+# asset keys must be wrangler's exact BLAKE3 hash or uploads 404 silently.
+# `pure` = portable Rust only, no C/asm build step on Windows.
+blake3 = { version = "1", default-features = false, features = ["std", "pure"] }
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

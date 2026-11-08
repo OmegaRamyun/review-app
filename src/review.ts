@@ -17,10 +17,18 @@ export interface ReviewFile {
   score: string;
   sections: Record<string, SectionText>;
   publish_state: "draft" | "exported" | "published";
+  /** URL path segment on the site (`/<slug>/`); fixed at first export so the link stays stable. */
+  slug: string;
+  /** Public URL of the review, set after a successful Cloudflare Pages publish. */
+  url: string;
+  /** Paste-ready Itch comment (user-editable; never posted by the app). */
+  itch_comment: string;
 }
 
 export function emptyReview(): ReviewFile {
-  return { version: 1, verdict: "", who_for: "", score: "", sections: {}, publish_state: "draft" };
+  return {
+    version: 1, verdict: "", who_for: "", score: "", sections: {}, publish_state: "draft", slug: "", url: "", itch_comment: "",
+  };
 }
 
 const str = (v: unknown) => (typeof v === "string" ? v : "");
@@ -38,6 +46,9 @@ export function parseReview(json: string | null): ReviewFile {
   return {
     version: 1, verdict: str(raw.verdict), who_for: str(raw.who_for), score: str(raw.score), sections,
     publish_state: ps === "exported" || ps === "published" ? ps : "draft",
+    slug: /^[a-z0-9][a-z0-9-]{0,63}$/.test(str(raw.slug)) ? str(raw.slug) : "",
+    url: /^https?:\/\//.test(str(raw.url)) ? str(raw.url) : "",
+    itch_comment: str(raw.itch_comment),
   };
 }
 
@@ -197,7 +208,7 @@ const TILE = "data:image/svg+xml," + encodeURIComponent(
   '<rect x="4" y="4" width="4" height="4" fill="#22325f"/><rect x="3" y="3" width="1" height="1" fill="#2c3f75"/></svg>',
 );
 
-const PAGE_CSS = `
+export const PAGE_CSS = `
 html{background:#1d2b53 url("${TILE}") repeat;image-rendering:pixelated}
 body{max-width:46rem;margin:1.5rem auto;padding:1.2rem 1.6rem;background:#fdf6e3;color:#1b1b1b;
  font:17px/1.6 Georgia,"Times New Roman",serif;border:3px double #1b1b1b;box-shadow:6px 6px 0 #000}

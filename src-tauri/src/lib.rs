@@ -1,3 +1,4 @@
+mod cloudflare;
 mod deepgram;
 mod gemini;
 mod media;
@@ -11,6 +12,7 @@ use tauri::{AppHandle, Manager, State};
 const KEYRING_SERVICE: &str = "app.reviewapp.desktop";
 const KEYRING_USER_DEEPGRAM: &str = "deepgram";
 const KEYRING_USER_GEMINI: &str = "gemini";
+const KEYRING_USER_CLOUDFLARE: &str = "cloudflare";
 /// Upper bound on system + prompt sent to Gemini, in bytes.
 const GEMINI_MAX_INPUT_BYTES: usize = 200_000;
 
@@ -136,6 +138,121 @@ fn delete_session_file(app: AppHandle, id: String, name: String) -> Result<(), S
     }
 }
 
+// ---------- site export (local folder = the publish source + manual-upload fallback) ----------
+// Layout under app data: site/index.html, site/reviews.json (local-only index of
+// entries; never uploaded), site/<slug>/index.html, site/<slug>/shots/<jpg>.
+
+const SITE_ENTRIES: &str = "reviews.json";
+
+fn site_root(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("site"))
+}
+
+fn valid_slug(slug: &str) -> bool {
+    (1..=64).contains(&slug.len())
+        && slug.as_bytes()[0] != b'-'
+        && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+#[derive(Serialize)]
+struct ExportResult {
+    /// The site folder (drag this into Cloudflare's dashboard upload for a manual publish).
+    site_dir: String,
+    /// This review's folder inside it.
+    review_dir: String,
+}
+
+/// Write one review into the site folder: page + its screenshots (copied from the
+/// session folder), refresh the front page and the entries list. Screenshots no
+/// longer referenced by the page are removed from the review's `shots/`.
+fn export_into(
+    site: &Path,
+    session_dir: &Path,
+    slug: &str,
+    html: &str,
+    shots: &[String],
+    index_html: &str,
+    entries_json: &str,
+) -> Result<ExportResult, String> {
+    if !valid_slug(slug) {
+        return Err("invalid slug".into());
+    }
+    if let Some(bad) = shots.iter().find(|n| !valid_name(n)) {
+        return Err(format!("invalid screenshot name {bad:?}"));
+    }
+    serde_json::from_str::<serde_json::Value>(entries_json).map_err(|e| format!("entries: {e}"))?;
+    let dir = site.join(slug);
+    let shots_dir = dir.join("shots");
+    std::fs::create_dir_all(&shots_dir).map_err(|e| e.to_string())?;
+    for name in shots {
+        let src = session_dir.join(name);
+        std::fs::copy(&src, shots_dir.join(name)).map_err(|e| format!("screenshot {name}: {e}"))?;
+    }
+    for entry in std::fs::read_dir(&shots_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !shots.contains(&name) && entry.path().is_file() {
+            std::fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
+        }
+    }
+    write_atomic(&dir.join("index.html"), html.as_bytes())?;
+    write_atomic(&site.join("index.html"), index_html.as_bytes())?;
+    write_atomic(&site.join(SITE_ENTRIES), entries_json.as_bytes())?;
+    Ok(ExportResult {
+        site_dir: site.to_string_lossy().into_owned(),
+        review_dir: dir.to_string_lossy().into_owned(),
+    })
+}
+
+#[tauri::command]
+fn load_site_entries(app: AppHandle) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(site_root(&app)?.join(SITE_ENTRIES)) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn export_review(
+    app: AppHandle,
+    id: String,
+    slug: String,
+    html: String,
+    shots: Vec<String>,
+    index_html: String,
+    entries_json: String,
+) -> Result<ExportResult, String> {
+    if !valid_id(&id) {
+        return Err("invalid session id".into());
+    }
+    let session_dir = sessions_root(&app)?.join(&id);
+    export_into(&site_root(&app)?, &session_dir, &slug, &html, &shots, &index_html, &entries_json)
+}
+
+#[derive(Serialize)]
+struct PublishResult {
+    site_url: String,
+    deployment_url: String,
+    uploaded: usize,
+}
+
+/// Upload the whole local site folder as a new production deployment. Only ever
+/// runs on the user's explicit click; the loop tests it against a mock server.
+#[tauri::command]
+async fn publish_site(app: AppHandle, account_id: String, project: String) -> Result<PublishResult, String> {
+    let site = site_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let token = get_key(KEYRING_USER_CLOUDFLARE, "Cloudflare")?;
+        let files = cloudflare::collect(&site, &[SITE_ENTRIES]).map_err(|e| format!("site folder: {e}"))?;
+        let d = cloudflare::deploy(cloudflare::API_BASE, &token, account_id.trim(), project.trim(), &files)?;
+        Ok(PublishResult { site_url: d.site_url, deployment_url: d.deployment_url, uploaded: d.uploaded })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------- API keys (OS keychain) ----------
 // Keys are write-only from the webview: set / has / clear, never get.
 
@@ -203,6 +320,21 @@ fn has_gemini_key() -> Result<bool, String> {
 #[tauri::command]
 fn clear_gemini_key() -> Result<(), String> {
     clear_key(KEYRING_USER_GEMINI)
+}
+
+#[tauri::command]
+fn set_cloudflare_key(key: String) -> Result<(), String> {
+    set_key(KEYRING_USER_CLOUDFLARE, &key)
+}
+
+#[tauri::command]
+fn has_cloudflare_key() -> Result<bool, String> {
+    has_key(KEYRING_USER_CLOUDFLARE)
+}
+
+#[tauri::command]
+fn clear_cloudflare_key() -> Result<(), String> {
+    clear_key(KEYRING_USER_CLOUDFLARE)
 }
 
 // ---------- transcription ----------
@@ -303,7 +435,13 @@ pub fn run() {
             set_gemini_key,
             has_gemini_key,
             clear_gemini_key,
-            gemini_draft
+            gemini_draft,
+            set_cloudflare_key,
+            has_cloudflare_key,
+            clear_cloudflare_key,
+            load_site_entries,
+            export_review,
+            publish_site
         ])
         .run(tauri::generate_context!())
         .expect("error while running Review App");
@@ -335,6 +473,29 @@ mod tests {
         assert!(check_gemini_input(&half, &half).is_ok());
         let e = check_gemini_input(&half, &format!("{half}x")).unwrap_err();
         assert!(e.contains("too large"), "{e}");
+    }
+
+    #[test]
+    fn export_writes_page_shots_and_prunes() {
+        let root = std::env::temp_dir().join(format!("ra-export-{}", std::process::id()));
+        let (site, sess) = (root.join("site"), root.join("sessions").join("s1"));
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::write(sess.join("shot-p0001-1.jpg"), b"jpg1").unwrap();
+        std::fs::write(sess.join("shot-p0002-2.jpg"), b"jpg2").unwrap();
+        let shots = vec!["shot-p0001-1.jpg".to_string(), "shot-p0002-2.jpg".to_string()];
+        let r = export_into(&site, &sess, "hookshot", "<p>a</p>", &shots, "<p>idx</p>", r#"{"entries":[]}"#).unwrap();
+        assert!(r.review_dir.ends_with("hookshot"));
+        assert_eq!(std::fs::read(site.join("hookshot/shots/shot-p0002-2.jpg")).unwrap(), b"jpg2");
+        assert_eq!(std::fs::read_to_string(site.join("index.html")).unwrap(), "<p>idx</p>");
+        // Re-export without the second shot: it is pruned from the site.
+        export_into(&site, &sess, "hookshot", "<p>b</p>", &shots[..1], "<p>idx</p>", "{}").unwrap();
+        assert!(!site.join("hookshot/shots/shot-p0002-2.jpg").exists());
+        assert_eq!(std::fs::read_to_string(site.join("hookshot/index.html")).unwrap(), "<p>b</p>");
+        for (slug, shot) in [("../x", "a.jpg"), ("-x", "a.jpg"), ("Caps", "a.jpg"), ("ok", "../a.jpg")] {
+            assert!(export_into(&site, &sess, slug, "", &[shot.to_string()], "", "{}").is_err(), "{slug} {shot}");
+        }
+        assert!(export_into(&site, &sess, "ok", "", &[], "", "not json").is_err());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
