@@ -1,0 +1,52 @@
+{
+  "units": [
+    {
+      "id": "U1",
+      "type": "code",
+      "status": "queued",
+      "files": "src/, src-tauri/, index.html, package.json, NOTES.md",
+      "brief": "Prototype the core loop in Tauri. PROVE THE FILE-PATH QUESTION FIRST: drag-drop (Tauri onDragDropEvent) must yield a real absolute path for a multi-GB OBS MKV, and the frontend must read the file by path/streaming (e.g. a range-capable asset/custom protocol or Rust-side chunked reads feeding Mediabunny) \u2014 NEVER FileReader / whole-file-in-memory over IPC. Write the proof (method + what was measured) into NOTES.md. Then: Import screen (filename, duration, resolution, audio track list, mic-track picker defaulting to Track 2, remembered choice) -> Mediabunny extracts the mic track downmixed to mono -> Deepgram prerecorded (model configurable, Nova-3 default, word timestamps; chunk ~15-20 min with offsets; key stored via the keyring crate, entered once in a settings field) -> transcript stored with the session -> Scrub & point screen layout: video player + transcript side by side, click a line seeks currentTime=word.start and waits for seeked, highlight via requestVideoFrameCallback. Test fixture: test-media/obs-layout-test.mkv (Track 1 game, Track 2 mic speech). No real Deepgram key exists on this box: make the request path unit-testable and note in NOTES.md what Cade must run on Windows with his key.",
+      "result": null
+    },
+    {
+      "id": "U2",
+      "type": "code",
+      "status": "queued",
+      "files": "src/, src-tauri/, index.html, NOTES.md",
+      "brief": "Points + buckets + screenshots on the Scrub & point screen: pin a transcript line as a point (id, bucket, quoted line + timestamp, author text, optional screenshot, created order); bucket picker with the 14 full-mode buckets and the 6 rapid-mode buckets exactly as listed in DESIGN.md; screenshot button grabs the current video frame (canvas drawImage -> toBlob JPEG 0.85, Mediabunny frame decode as fallback) saved into the session folder; points list filterable by bucket, jump to timestamp, edit/delete; pinned lines marked in the transcript. Persist points in the session folder.",
+      "result": null
+    },
+    {
+      "id": "U3",
+      "type": "code",
+      "status": "queued",
+      "files": "src/, src-tauri/, index.html, NOTES.md",
+      "brief": "Assemble stage: segmented review editor (one section per bucket with points, prose field above its points), review settings (full/rapid mode, verdict wording, who-it's-for line; no scores in rapid mode), live preview of the styled page in the HG101/GameFAQs idiom with Neocities charm (ASCII-ish headers, numbered sections, readable type, tiled backgrounds, pixel touches) \u2014 see DESIGN.md and ~/workspace/research_notes/game-review-structure-research-20261108-0652/report.md. Add the AI draft: a button that sends the buckets/points to the Gemini API (key via keyring) and fills the prose fields with a DRAFT the user edits \u2014 clearly marked as a draft in the UI, never auto-published. Settle the model/key flow and record it in NOTES.md.",
+      "result": null
+    },
+    {
+      "id": "U4",
+      "type": "code",
+      "status": "queued",
+      "files": "src/, src-tauri/, index.html, NOTES.md",
+      "brief": "Publish stage: export the finished review (HTML + screenshots) to Cloudflare Pages via the direct-upload API (API token via keyring; project name configurable), with a save-files-locally fallback; then the Itch comment generator \u2014 paste-ready summary (hook + one-line verdict + link) with a copy button. Nothing is ever posted automatically. The loop must never run a real publish; test against a mocked endpoint.",
+      "result": null
+    },
+    {
+      "id": "U5",
+      "type": "code",
+      "status": "queued",
+      "files": "src/, src-tauri/, index.html, NOTES.md",
+      "brief": "Library + demo-day queue: list of sessions (game, date, clip length, status imported/transcribed/points pinned/review done/published), searchable by game/event; each session is a folder (recording path, mic extract, transcript, points, screenshots, review draft); new session by drop or picker; demo-day mode queues several recordings and works them in order.",
+      "result": null
+    },
+    {
+      "id": "U6",
+      "type": "code",
+      "status": "queued",
+      "files": "src/, src-tauri/, index.html, NOTES.md",
+      "brief": "Compress-clip button on the Scrub & point screen (needs U2's scrubber): mark an in/out range, hit the button, run the Compression Protocol presets with Mediabunny (same engine and targets/caps as Clip Sizer — reference implementation at /home/hatch/workspace/clip-sizer (read-only; port its presets, do not edit it), no new transcoder, no FFmpeg): Discord MP4 (H.264 + AAC game audio, under the Discord cap) + muted 4chan WebM (VP9, under 4MB) + Socials pack. Outputs land in the session folder. Record the preset values used in NOTES.md.",
+      "result": null
+    }
+  ]
+}
