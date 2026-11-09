@@ -15,6 +15,9 @@ progress { width: 100%; }
 .player { min-height: 0; overflow: auto; }
 .player video { width: 100%; background: #000; }
 .transport { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.4rem; }
+.clipbar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-top: 0.4rem; }
+.k-files { margin: 0.2rem 0; padding-left: 1.2rem; font-size: 0.85em; }
+.k-files .over { color: #c33; }
 .lines { overflow-y: auto; margin: 0; padding: 0; list-style: none; border-left: 1px solid #ccc; }
 .lines li { padding: 0.3rem 0.6rem; cursor: pointer; }
 .lines li:hover { background: #ebe5d3; }

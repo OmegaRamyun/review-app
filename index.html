@@ -136,6 +136,21 @@
             <span id="v-time">0:00</span>
             <button id="v-shot" title="Grab the current frame into the point being composed">Screenshot</button>
           </div>
+          <div class="clipbar" title="Compress clip: Compression Protocol presets over the marked range">
+            <button id="k-in" title="Mark the clip's In at the current time">Mark In</button>
+            <button id="k-in-t" class="linkish" title="Jump to In">–</button>
+            <button id="k-out" title="Mark the clip's Out at the current time">Mark Out</button>
+            <button id="k-out-t" class="linkish" title="Jump to Out">–</button>
+            <label title="Also render Horizontal 1920×1080, Vertical 1080×1920 and Square 1080×1080 at 8 Mbps"><input type="checkbox" id="k-socials"> Socials pack</label>
+            <select id="k-bg" title="How the Socials shapes are filled (Discord/4chan always keep the clip's shape)">
+              <option value="fit" selected>Fit (black bars)</option>
+              <option value="fill">Fill (crop)</option>
+              <option value="gradient">Gradient bars</option>
+            </select>
+            <button id="k-go">Compress clip</button>
+          </div>
+          <p id="k-status" class="hint"></p>
+          <ul id="k-files" class="k-files"></ul>
           <p id="v-error" class="error"></p>
         </div>
         <ol id="lines" class="lines"></ol>

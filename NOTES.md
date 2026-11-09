@@ -527,3 +527,92 @@ built but not clicked through in a webview.
    - Complete the review (or click `Work next`). It should cleanly flush `review.json` and advance to the next session.
    - Once all queued sessions are finished, clicking `Work next` should return to the library with "Every queued recording is done." and completed sessions crossed out in the queue list.
 
+
+## U6: Compress-clip button (Scrub & point)
+
+**What it does:** under the scrubber's transport, `Mark In` / `Mark Out` take the
+video's current time (the times next to them are click-to-jump). `Compress clip`
+renders the Compression Protocol outputs over [In, Out] one at a time and writes
+them into the session folder as `clip_<in>-<out>_<Output>.<ext>` (e.g.
+`clip_1m02.5-1m20.0_Discord.mp4`). The same range overwrites its earlier files
+atomically. The `Socials pack` checkbox (off by default, as in Clip Sizer) adds
+the three 1080p shapes, and the select sets their background (Fit / Fill /
+Gradient). Each file gets a result line: size, frame, codec, kb/s, audio, attempts,
+under/OVER cap, and path. Length warnings never block: 4chan starves past 45 s,
+and Socials is over the X limit past 2:20.
+
+**Engine:** Mediabunny `Conversion` (WebCodecs), ported from Clip Sizer's
+hardware engine. Frames are composited on an OffscreenCanvas, the source is read
+by Range through the `media` scheme (`UrlSource`), and the output is a
+`BufferTarget` saved with `save_session_bytes`. There is no transcoder besides
+Mediabunny and no FFmpeg. Clip Sizer's FFmpeg.wasm CPU fallback was deliberately
+**not** ported, so if the webview cannot encode an output, that output fails with
+a plain message and the remaining outputs still run. Code: presets/math in
+`src/clip.ts` (unit-tested in `src/clip.test.mjs`), encoder in
+`src/media.ts` (`encodeClip`, `sampleColors`), UI in `src/main.ts` §3c.
+
+**Preset values used** (from Clip Sizer's code constants, `index.html` v44; its
+README prose says 4.0 MB / 3.89 MB for 4chan, but the code it runs uses the values
+below):
+
+| Output | Container / codec | Frame | Video | Audio | Size |
+|---|---|---|---|---|---|
+| Discord | MP4 (fastStart in-memory) / H.264 | source shape, long side ≤1080 by bitrate tier | `floor((19e6·8/len/1000 − 128)·0.94)` kb/s, CBR, floor 80 | AAC 128k CBR stereo, game track | target 19 MB, hard cap 19.9 MB |
+| 4chan | WebM / VP9, key frame every 20 s | source shape, long side aimed at 1280, floored at 960 (if source ≥960) | `floor(4.09e6·8/len/1000·0.97)` kb/s, VBR, floor 70 | muted | target 4.09 MB, hard cap 4,194,304 B |
+| Horizontal | MP4 / H.264 | 1920×1080 | 8000 kb/s CBR | AAC 128k CBR stereo | no cap |
+| Vertical | MP4 / H.264 | 1080×1920 (fitted clip centred 40% down) | 8000 kb/s CBR | AAC 128k CBR stereo | no cap |
+| Square | MP4 / H.264 | 1080×1080 | 8000 kb/s CBR | AAC 128k CBR stereo | no cap |
+
+All outputs are 30 fps. Resolution tiers ("Mixed", thresholdScale 1): <180 kb/s
+→ 360, <350 → 480, <650 → 720 on the long side, else the output's cap, never
+upscaled. Over-cap retry (Discord/4chan only): up to 2 re-encodes, at
+`kbps × cap/size × 0.95` (floored at the minimum). Gradient: per-channel median
+of 5 sampled frame averages (10/30/50/70/90% of the range), stops ×0.45 / ×0.75,
+plus a 2px outline (the lighter stop blended 30% toward white). Game audio = Track 1, or the
+first track that isn't the session's mic track. With no such track, Discord and Socials
+come out silent and the result line says so.
+
+Faithful-port quirk, kept on purpose: Clip Sizer's Discord frame cap is 1080 on
+the **long** side, so a 1280×720 OBS recording becomes **1080×606** for Discord,
+even with a large bitrate budget. The 4chan file stays 1280×720. If Cade wants
+Discord at native 720p, change both apps together.
+
+**Verified here** (headless Chromium 153 shell, current `media.ts`, Range
+server with the media.rs caps, `test-media/obs-layout-test.mkv`, range 2–12 s):
+- 4chan: 1,864,511 B, 1280×720 VP9, 10.000 s, no audio, 1 attempt: PASS.
+- Discord / Horizontal / Vertical / Square **with game audio: FAIL** with "this
+  webview cannot encode AAC audio". Linux Chromium has no AAC `AudioEncoder`
+  (Opus/PCM only). Re-run muted, all four passed: Discord 1,453,293 B 1080×606,
+  Horizontal 3,332,030 B 1920×1080, Vertical 1,685,742 B, Square 1,461,205 B.
+  All files are H.264 High, 30 fps, 300 frames, exactly 10.000 s.
+- Vertical frame inspected: the gradient bars, the clip at gaze height, and the 2px outline are all there.
+- Retry loop: with the cap forced down to 800 KB it ran 3 attempts and
+  stopped 3% over. The UI reports such files as "OVER the cap; trim shorter",
+  not as success.
+- Encoders undershoot CBR targets on easy content (Discord asked 14 Mb/s, got
+  ~1.2 Mb/s on test bars). That's harmless for caps, but don't expect sizes to
+  match the budget.
+- `npm run test:unit` 39/39, `bash ops/check.sh` OK. Not run inside the Tauri
+  webview on this box (WebKitGTK is only the compile gate).
+
+## What Cade must verify on Windows (U6)
+
+1. **AAC encode in WebView2 (the main risk).** Open a transcribed session, Mark
+   In at ~0:10 and Out at ~0:30, and click Compress clip. The Discord line must say
+   `AAC 128k (Track 1)`, and the MP4 must play **with game audio, no mic** in a
+   player and in a Discord upload. If it says "cannot encode AAC audio", WebView2
+   lacks AAC. The fix would be Clip Sizer's `@mediabunny/aac-encoder` WASM
+   fallback, which is a new dependency, so it needs a ruling.
+2. **H.264 + VP9 on the RX580.** Check that all files are produced and play. Clip
+   Sizer runs the 4chan VP9 on the hardware path; on AMD it may fall back to
+   software VP9, which is slower but fine.
+3. **Caps on real gameplay** (busy footage, not test bars): a 30 s clip must give
+   Discord ≤19.9 MB and 4chan ≤4 MiB, both "(under the cap)". Try a 60 s clip
+   too: 4chan should still be under its cap, and blocky is expected there.
+4. **Socials pack:** tick it, pick Gradient, and compress a ≤20 s clip. Check
+   that three 1080p MP4s with audio appear, and that Vertical has gradient bars
+   with the clip 40% down. Watch memory: each file is built in RAM and then sent over
+   IPC (≈120 MB per shape at 2:00), so try one 2:00 Socials run and confirm the
+   app stays responsive.
+5. **Files land in** `%APPDATA%\app.reviewapp.desktop\sessions\<id>\clip_*`.
+   Re-running the same range overwrites the old files rather than duplicating them.

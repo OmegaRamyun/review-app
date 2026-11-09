@@ -2,7 +2,11 @@
 // addressed by absolute path (drag-drop) and read through the `media` scheme.
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { extractMicWav, grabFrame, mediaUrl, probe, type Probe } from "./media";
+import { encodeClip, extractMicWav, grabFrame, mediaUrl, probe, sampleColors, type Probe } from "./media";
+import {
+  FALLBACK_GRADIENT, clipFileName, fmtBytes, gameTrack, gradientFrom, lengthWarnings,
+  planClip, rangeError, type BgMode,
+} from "./clip";
 import {
   bucketLabel, bucketsFor, deletePoint, emptyPoints, filterPoints, newPoint, parsePoints, pinnedTimes,
   shotName, updatePoint, type Mode, type Point, type PointsFile,
@@ -572,9 +576,107 @@ async function openScrub(path: string, words: Word[], playable = true) {
     video.src = mediaUrl(path);
     video.requestVideoFrameCallback(onFrame);
   }
+  resetClip();
   await loadPoints();
   show("scrub");
 }
+
+// ---------- 3c. Compress clip (U6) ----------
+let clipIn: number | null = null;
+let clipOut: number | null = null;
+let clipBusy = false;
+
+function renderClipMarks() {
+  $("k-in-t").textContent = clipIn === null ? "–" : fmtTime(clipIn);
+  $("k-out-t").textContent = clipOut === null ? "–" : fmtTime(clipOut);
+  const err = clipIn !== null && clipOut !== null ? rangeError(clipIn, clipOut, probed?.duration ?? 0) : null;
+  const len = clipIn !== null && clipOut !== null && !err ? clipOut - clipIn : null;
+  const warn = len === null ? [] : lengthWarnings(len, $<HTMLInputElement>("k-socials").checked);
+  if (!clipBusy) $("k-status").textContent = err ?? (len === null ? "" : [`Clip ${len.toFixed(1)} s.`, ...warn].join(" "));
+  $<HTMLButtonElement>("k-go").disabled = clipBusy || !probed;
+}
+
+function resetClip() {
+  if (clipBusy) return;
+  clipIn = clipOut = null;
+  $("k-files").replaceChildren();
+  renderClipMarks();
+}
+
+async function compressClip() {
+  const err = rangeError(clipIn, clipOut, probed?.duration ?? 0);
+  if (err || clipIn === null || clipOut === null) {
+    $("k-status").textContent = err ?? "";
+    return;
+  }
+  if (!session || !probed || !media || !probed.width || !probed.height) {
+    $("k-status").textContent = "The recording is not readable, so there is nothing to compress.";
+    return;
+  }
+  const id = session.id, path = media.path;
+  const start = clipIn, end = Math.min(clipOut, probed.duration || clipOut);
+  const src = { width: probed.width, height: probed.height };
+  const socials = $<HTMLInputElement>("k-socials").checked;
+  const mode = $<HTMLSelectElement>("k-bg").value as BgMode;
+  const jobs = planClip(end - start, src.width, src.height, socials, mode);
+  const audio = gameTrack(probed.audio.length, session.mic_track);
+  clipBusy = true;
+  renderClipMarks();
+  video.pause();
+  const list = $("k-files");
+  list.replaceChildren();
+  const status = $("k-status");
+  try {
+    const gradient = socials && mode === "gradient" ? gradientFrom(await sampleColors(path, start, end)) : FALLBACK_GRADIENT;
+    let made = 0;
+    for (const [i, job] of jobs.entries()) {
+      const li = document.createElement("li");
+      list.append(li);
+      const tag = `${job.label} (${i + 1}/${jobs.length})`;
+      try {
+        const r = await encodeClip(path, job, { start, end }, src, audio, gradient, (p, attempt) => {
+          status.textContent = `${tag}${attempt ? ` — over the cap, retry ${attempt}` : ""}: ${Math.round(p * 100)}%…`;
+        });
+        const name = clipFileName(start, end, job);
+        const saved = await invoke<string>("save_session_bytes", new Uint8Array(r.bytes), {
+          headers: { "x-session": id, "x-name": name },
+        });
+        const size = r.bytes.byteLength;
+        const over = job.cap !== null && size > job.cap;
+        li.className = over ? "over" : "";
+        li.textContent =
+          `${job.label}: ${fmtBytes(size)}, ${job.width}×${job.height} ${r.codecLabel} ~${r.kbps} kb/s` +
+          (job.audio ? (audio === null ? ", no game-audio track found" : `, AAC 128k (Track ${audio})`) : ", muted") +
+          (r.attempts > 1 ? `, ${r.attempts} attempts` : "") +
+          (job.cap === null ? "" : over ? ` — OVER the ${fmtBytes(job.cap)} cap; trim shorter.` : ` (under the ${fmtBytes(job.cap)} cap)`) +
+          ` → ${saved}`;
+        made++;
+      } catch (e) {
+        li.className = "over";
+        li.textContent = `${job.label}: failed — ${String(e)}`;
+      }
+    }
+    status.textContent = `${made} of ${jobs.length} file${jobs.length === 1 ? "" : "s"} written to the session folder.`;
+  } finally {
+    clipBusy = false;
+    $<HTMLButtonElement>("k-go").disabled = !probed;
+  }
+}
+
+$("k-in").addEventListener("click", () => {
+  clipIn = video.currentTime;
+  if (clipOut !== null && clipOut <= clipIn) clipOut = null;
+  renderClipMarks();
+});
+$("k-out").addEventListener("click", () => {
+  clipOut = video.currentTime;
+  if (clipIn !== null && clipIn >= clipOut) clipIn = null;
+  renderClipMarks();
+});
+$("k-in-t").addEventListener("click", () => clipIn !== null && void seekTo(clipIn));
+$("k-out-t").addEventListener("click", () => clipOut !== null && void seekTo(clipOut));
+$("k-socials").addEventListener("change", renderClipMarks);
+$("k-go").addEventListener("click", () => void compressClip());
 
 // ---------- 3b. Points ----------
 let points: PointsFile = emptyPoints();
