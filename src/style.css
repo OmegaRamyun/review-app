@@ -1,3 +1,40 @@
+/* Pico v2 theme — the paper palette, carried into the framework. Pico loads
+   first (see index.html); this file loads after, so rules below win conflicts.
+   NOTE: Pico v2.1.1 scopes its light theme under
+   :root:not([data-theme=dark]), [data-theme=light] — plain :root loses to that
+   on specificity, so the overrides use the same selector. */
+:root:not([data-theme="dark"]), [data-theme="light"] {
+  --pico-font-family: system-ui, sans-serif;
+  --pico-background-color: #f4f1e8;
+  --pico-color: #222;
+  --pico-muted-color: #777;
+  --pico-muted-border-color: #ccc;
+  --pico-border-color: #ccc;
+  --pico-primary: #246;
+  --pico-primary-background: #246;
+  --pico-primary-border: #246;
+  --pico-primary-hover: #357;
+  --pico-primary-hover-background: #357;
+  --pico-primary-hover-border: #357;
+  --pico-primary-focus: rgba(34, 68, 102, 0.25);
+  --pico-primary-inverse: #f4f1e8;
+  --pico-form-element-background-color: #fff;
+  --pico-form-element-border-color: #aaa;
+  --pico-form-element-color: #222;
+  --pico-form-element-placeholder-color: #999;
+  --pico-form-element-active-background-color: #fff;
+  --pico-form-element-active-border-color: #246;
+  --pico-form-element-focus-color: rgba(34, 68, 102, 0.25);
+  --pico-border-radius: 0.375rem;
+  --pico-card-background-color: #fff;
+  --pico-card-border-color: #ccc;
+}
+
+/* [hidden] must win over our own display rules (#settings label is
+   display:block, .queue-bar is display:flex) — otherwise toggled rows
+   (e.g. the AI base-URL row under Gemini) leak visible. */
+[hidden] { display: none !important; }
+
 body { font-family: system-ui, sans-serif; margin: 0; background: #f4f1e8; color: #222; }
 header { display: flex; gap: 1rem; align-items: baseline; padding: 0.5rem 1rem; border-bottom: 1px solid #ccc; }
 header h1 { font-size: 1.2rem; margin: 0; }

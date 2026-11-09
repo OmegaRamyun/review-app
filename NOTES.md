@@ -627,3 +627,12 @@ server with the media.rs caps, `test-media/obs-layout-test.mkv`, range 2–12 s)
 - Defaults: Gemini `gemini-2.5-flash`, Claude `claude-sonnet-4-5`, OpenAI `gpt-4o-mini`, Compatible blank (placeholder suggests a NanoGPT model id).
 - `bash ops/check.sh` OK; `cargo test` 34/34 (new mock-server tests for both clients). Frontend renders in a plain browser (dropdown switching verified headless); not run in a webview on this box.
 - What Cade must verify on Windows: pick OpenAI Compatible, paste a NanoGPT key, leave the base URL as-is, type a NanoGPT model id, and run an AI draft on a real session — the draft should fill from the NanoGPT model. Also confirm the Gemini default still works unchanged.
+
+## Pico.css pass (2026-11-09, main-agent follow-up, not a loop unit)
+
+- Pico v2 (`@picocss/pico@2`, CDN) loads before `src/style.css`; `<html data-theme="light">` pins the light theme so a dark-mode OS doesn't flip Pico dark under the cream custom CSS. Same treatment as Clip Sizer v46.
+- `src/style.css` opens with a Pico theme block that carries the paper palette into Pico vars: primary #246 (the existing link colour), bg #f4f1e8, form bg #fff, borders #aaa/#ccc, radius 0.375rem. No colours changed outside the Pico vars.
+- `[hidden] { display: none !important; }` added. `#settings label { display: block }` was beating the `hidden` attribute, so the AI Base URL row showed under Gemini (a bug from the dropdown change). The rule also covers `.queue-bar` and other display-styled toggles.
+- Verified headless (Playwright shell, Pico relayed via Node fetch): Save-key button `rgb(34, 68, 102)` with padding `15px 20px`, and `#ai-base-row` is `display: none` under Gemini. The screenshot shows filled navy buttons and rounded inputs. `bash ops/check.sh` OK.
+- Lesson 1: Pico v2.1.1 scopes its light theme under `:root:not([data-theme=dark]), [data-theme=light]`, which has (0,2,0) specificity. Overrides on plain `:root` lose, and buttons stay Pico-default blue #0172ad. Use the same selector.
+- Lesson 2: in Playwright, relay the CDN sheet through ONE `ctx.route('**/*', …)` handler that fulfills Pico and continues localhost. With two separate `ctx.route` calls the Pico request silently never fulfilled, so the sheet didn't load and buttons stayed UA-default.
