@@ -24,13 +24,23 @@
         <span id="dg-status"></span>
         <label>Deepgram model <input id="dg-model" type="text" placeholder="nova-3" /></label>
         <hr />
-        <label>Gemini API key (AI draft on the Assemble screen — optional)
-          <input id="gm-key" type="password" autocomplete="off" placeholder="paste once — stored in the OS keychain" />
+        <label>AI draft provider (Assemble screen — optional)
+          <select id="ai-provider">
+            <option value="gemini">Gemini</option>
+            <option value="claude">Claude</option>
+            <option value="openai">OpenAI</option>
+            <option value="openai_compat">OpenAI Compatible — NanoGPT, OpenRouter, local…</option>
+          </select>
         </label>
-        <button id="gm-save">Save key</button>
-        <button id="gm-clear">Forget key</button>
-        <span id="gm-status"></span>
-        <label>Gemini model <input id="gm-model" type="text" placeholder="gemini-2.5-flash" /></label>
+        <label><span id="ai-key-label">Gemini API key</span>
+          <a id="ai-key-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">get a key ↗</a>
+          <input id="ai-key" type="password" autocomplete="off" placeholder="paste once — stored in the OS keychain" />
+        </label>
+        <button id="ai-save">Save key</button>
+        <button id="ai-clear">Forget key</button>
+        <span id="ai-status"></span>
+        <label><span id="ai-model-label">Gemini model</span> <input id="ai-model" type="text" placeholder="gemini-2.5-flash" /></label>
+        <label id="ai-base-row" hidden>Base URL <input id="ai-base" type="text" placeholder="https://nano-gpt.com/api/v1" /></label>
         <hr />
         <label>Cloudflare API token (Publish — needs Account › Cloudflare Pages › Edit)
           <input id="cf-key" type="password" autocomplete="off" placeholder="paste once — stored in the OS keychain" />

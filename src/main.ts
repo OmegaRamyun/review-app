@@ -74,30 +74,74 @@ $("dg-clear").addEventListener("click", async () => {
 });
 void refreshKeyStatus();
 
-// Gemini key (AI draft): same write-only keychain flow as Deepgram; optional, so the panel is not forced open.
-const geminiModelInput = $<HTMLInputElement>("gm-model");
-geminiModelInput.value = localStorage.getItem(LS_GEMINI_MODEL) ?? "";
-geminiModelInput.addEventListener("change", () => localStorage.setItem(LS_GEMINI_MODEL, geminiModelInput.value.trim()));
-async function refreshGeminiStatus() {
-  const has = await invoke<boolean>("has_gemini_key").catch(() => false);
-  $("gm-status").textContent = has ? "key stored in OS keychain" : "no key stored";
+// AI draft provider: one keychain slot per provider; the key/model/base-URL
+// rows follow the dropdown. Provider choice + per-provider model + base URL
+// live in localStorage; keys never leave the OS keychain.
+type AiProvider = "gemini" | "claude" | "openai" | "openai_compat";
+const LS_AI_PROVIDER = "ra.aiProvider";
+const LS_AI_MODEL_PREFIX = "ra.aiModel.";
+const LS_AI_BASE = "ra.aiBaseUrl";
+const AI_DEFAULT_BASE = "https://nano-gpt.com/api/v1";
+const AI_PROVIDERS: Record<AiProvider, { keyLabel: string; modelLabel: string; defaultModel: string; modelPlaceholder: string; keyLink: string; keyLinkText: string }> = {
+  gemini: { keyLabel: "Gemini API key", modelLabel: "Gemini model", defaultModel: "gemini-2.5-flash", modelPlaceholder: "gemini-2.5-flash", keyLink: "https://aistudio.google.com/apikey", keyLinkText: "get a key ↗" },
+  claude: { keyLabel: "Claude API key", modelLabel: "Claude model", defaultModel: "claude-sonnet-4-5", modelPlaceholder: "claude-sonnet-4-5", keyLink: "https://console.anthropic.com/settings/keys", keyLinkText: "get a key ↗" },
+  openai: { keyLabel: "OpenAI API key", modelLabel: "OpenAI model", defaultModel: "gpt-4o-mini", modelPlaceholder: "gpt-4o-mini", keyLink: "https://platform.openai.com/api-keys", keyLinkText: "get a key ↗" },
+  openai_compat: { keyLabel: "OpenAI Compatible API key", modelLabel: "Model", defaultModel: "", modelPlaceholder: "e.g. z-ai/glm-5.3-flash-uncensored", keyLink: "https://nano-gpt.com/api", keyLinkText: "NanoGPT API ↗" },
+};
+const aiProviderSelect = $<HTMLSelectElement>("ai-provider");
+const aiModelInput = $<HTMLInputElement>("ai-model");
+const aiBaseInput = $<HTMLInputElement>("ai-base");
+const aiProvider = (): AiProvider => {
+  const v = aiProviderSelect.value;
+  return v === "claude" || v === "openai" || v === "openai_compat" ? v : "gemini";
+};
+const aiModel = () => aiModelInput.value.trim() || AI_PROVIDERS[aiProvider()].defaultModel;
+// One-time migration: a model saved under the old Gemini-only key moves over.
+if (!localStorage.getItem(LS_AI_MODEL_PREFIX + "gemini")) {
+  const old = localStorage.getItem(LS_GEMINI_MODEL);
+  if (old) localStorage.setItem(LS_AI_MODEL_PREFIX + "gemini", old);
 }
-$("gm-save").addEventListener("click", async () => {
-  const el = $<HTMLInputElement>("gm-key");
+function refreshAiRows() {
+  const p = aiProvider();
+  const meta = AI_PROVIDERS[p];
+  $("ai-key-label").textContent = meta.keyLabel;
+  const link = $<HTMLAnchorElement>("ai-key-link");
+  link.href = meta.keyLink;
+  link.textContent = meta.keyLinkText;
+  $("ai-model-label").textContent = meta.modelLabel;
+  aiModelInput.placeholder = meta.modelPlaceholder;
+  aiModelInput.value = localStorage.getItem(LS_AI_MODEL_PREFIX + p) ?? "";
+  $("ai-base-row").hidden = p !== "openai_compat";
+  void refreshAiStatus();
+}
+async function refreshAiStatus() {
+  const has = await invoke<boolean>(`has_${aiProvider()}_key`).catch(() => false);
+  $("ai-status").textContent = has ? "key stored in OS keychain" : "no key stored";
+}
+aiProviderSelect.value = localStorage.getItem(LS_AI_PROVIDER) ?? "gemini";
+aiProviderSelect.addEventListener("change", () => {
+  localStorage.setItem(LS_AI_PROVIDER, aiProvider());
+  refreshAiRows();
+});
+aiModelInput.addEventListener("change", () => localStorage.setItem(LS_AI_MODEL_PREFIX + aiProvider(), aiModelInput.value.trim()));
+aiBaseInput.value = localStorage.getItem(LS_AI_BASE) ?? "";
+aiBaseInput.addEventListener("change", () => localStorage.setItem(LS_AI_BASE, aiBaseInput.value.trim()));
+$("ai-save").addEventListener("click", async () => {
+  const el = $<HTMLInputElement>("ai-key");
   try {
-    await invoke("set_gemini_key", { key: el.value });
+    await invoke(`set_${aiProvider()}_key`, { key: el.value });
     el.value = "";
   } catch (e) {
-    $("gm-status").textContent = String(e);
+    $("ai-status").textContent = String(e);
     return;
   }
-  void refreshGeminiStatus();
+  void refreshAiStatus();
 });
-$("gm-clear").addEventListener("click", async () => {
-  await invoke("clear_gemini_key").catch(() => {});
-  void refreshGeminiStatus();
+$("ai-clear").addEventListener("click", async () => {
+  await invoke(`clear_${aiProvider()}_key`).catch(() => {});
+  void refreshAiStatus();
 });
-void refreshGeminiStatus();
+refreshAiRows();
 
 // ---------- screens ----------
 type Screen = "library" | "import" | "transcribe" | "scrub" | "assemble" | "publish";
@@ -1200,26 +1244,34 @@ $("a-back").addEventListener("click", () => {
   show("scrub");
 });
 
-// AI draft: buckets + points → Gemini (key stays in Rust) → DRAFT prose in empty / still-draft sections only.
+// AI draft: buckets + points → the provider picked in Settings (key stays in Rust) → DRAFT prose in empty / still-draft sections only.
 $("a-draft").addEventListener("click", async () => {
   if (!session) return;
   const status = $("a-status");
-  if (!(await invoke<boolean>("has_gemini_key").catch(() => false))) {
-    status.textContent = "Enter your Gemini API key in Settings first.";
+  const provider = aiProvider();
+  const providerName = AI_PROVIDERS[provider].keyLabel.replace(" API key", "");
+  if (!(await invoke<boolean>(`has_${provider}_key`).catch(() => false))) {
+    status.textContent = `Enter your ${providerName} API key in Settings first.`;
     $<HTMLDetailsElement>("settings").open = true;
     return;
   }
   const buckets = sectionBuckets(mode(), points.points);
   const btn = $<HTMLButtonElement>("a-draft");
   btn.disabled = true;
-  const gmModel = geminiModelInput.value.trim() || "gemini-2.5-flash";
-  status.textContent = `Drafting with ${gmModel}…`;
+  const model = aiModel();
+  status.textContent = `Drafting with ${model || providerName}…`;
   try {
     const prompt = draftPrompt(
       { title: session.title, mode: mode(), verdict: review.verdict, who_for: review.who_for, points: points.points },
       buckets,
     );
-    const text = await invoke<string>("gemini_draft", { model: gmModel, system: DRAFT_SYSTEM, prompt });
+    const text = await invoke<string>("ai_draft", {
+      provider,
+      model,
+      baseUrl: provider === "openai_compat" ? (aiBaseInput.value.trim() || AI_DEFAULT_BASE) : "",
+      system: DRAFT_SYSTEM,
+      prompt,
+    });
     const { filled, kept } = applyDraft(review, parseDraft(text, buckets));
     await writeReview();
     renderAssemble();

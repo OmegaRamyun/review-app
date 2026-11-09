@@ -616,3 +616,14 @@ server with the media.rs caps, `test-media/obs-layout-test.mkv`, range 2–12 s)
    app stays responsive.
 5. **Files land in** `%APPDATA%\app.reviewapp.desktop\sessions\<id>\clip_*`.
    Re-running the same range overwrites the old files rather than duplicating them.
+
+## AI draft provider dropdown (2026-11-09, main-agent follow-up, not a loop unit)
+
+- Settings → "AI draft provider" dropdown: Gemini (default), Claude, OpenAI, OpenAI Compatible.
+- One keychain slot per provider (`gemini`, `claude`, `openai`, `openai_compat`); the key/model rows follow the dropdown, and the model is remembered per provider in localStorage (`ra.aiModel.<provider>`). A model saved under the old Gemini-only key (`ra.geminiModel`) migrates once into `ra.aiModel.gemini`.
+- OpenAI Compatible shows a Base URL row (placeholder + fallback `https://nano-gpt.com/api/v1`; verified live — `/v1/models` returns 200). NanoGPT is the worked example; OpenRouter / local servers take any OpenAI-compatible base URL.
+- Each provider row links to its key page: Gemini → AI Studio, Claude → console.anthropic.com/settings/keys, OpenAI → platform.openai.com/api-keys, Compatible → nano-gpt.com/api.
+- Backend: new `src-tauri/src/claude.rs` (Messages API, `anthropic-version: 2023-06-01`, no JSON mode — the system prompt carries "reply with JSON only") and `src-tauri/src/openai.rs` (chat/completions, `response_format: json_object`, shared by OpenAI + Compatible). One `ai_draft(provider, model, base_url, system, prompt)` command routes; `gemini_draft` removed. Keys stay header-only; error paths redact the key, same as Gemini.
+- Defaults: Gemini `gemini-2.5-flash`, Claude `claude-sonnet-4-5`, OpenAI `gpt-4o-mini`, Compatible blank (placeholder suggests a NanoGPT model id).
+- `bash ops/check.sh` OK; `cargo test` 34/34 (new mock-server tests for both clients). Frontend renders in a plain browser (dropdown switching verified headless); not run in a webview on this box.
+- What Cade must verify on Windows: pick OpenAI Compatible, paste a NanoGPT key, leave the base URL as-is, type a NanoGPT model id, and run an AI draft on a real session — the draft should fill from the NanoGPT model. Also confirm the Gemini default still works unchanged.

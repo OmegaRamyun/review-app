@@ -1,7 +1,9 @@
+mod claude;
 mod cloudflare;
 mod deepgram;
 mod gemini;
 mod media;
+mod openai;
 
 use deepgram::Word;
 use media::MediaState;
@@ -12,9 +14,12 @@ use tauri::{AppHandle, Manager, State};
 const KEYRING_SERVICE: &str = "app.reviewapp.desktop";
 const KEYRING_USER_DEEPGRAM: &str = "deepgram";
 const KEYRING_USER_GEMINI: &str = "gemini";
+const KEYRING_USER_CLAUDE: &str = "claude";
+const KEYRING_USER_OPENAI: &str = "openai";
+const KEYRING_USER_OPENAI_COMPAT: &str = "openai_compat";
 const KEYRING_USER_CLOUDFLARE: &str = "cloudflare";
-/// Upper bound on system + prompt sent to Gemini, in bytes.
-const GEMINI_MAX_INPUT_BYTES: usize = 200_000;
+/// Upper bound on system + prompt sent to the AI draft provider, in bytes.
+const AI_MAX_INPUT_BYTES: usize = 200_000;
 
 // ---------- media ----------
 
@@ -419,6 +424,51 @@ fn clear_gemini_key() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_claude_key(key: String) -> Result<(), String> {
+    set_key(KEYRING_USER_CLAUDE, &key)
+}
+
+#[tauri::command]
+fn has_claude_key() -> Result<bool, String> {
+    has_key(KEYRING_USER_CLAUDE)
+}
+
+#[tauri::command]
+fn clear_claude_key() -> Result<(), String> {
+    clear_key(KEYRING_USER_CLAUDE)
+}
+
+#[tauri::command]
+fn set_openai_key(key: String) -> Result<(), String> {
+    set_key(KEYRING_USER_OPENAI, &key)
+}
+
+#[tauri::command]
+fn has_openai_key() -> Result<bool, String> {
+    has_key(KEYRING_USER_OPENAI)
+}
+
+#[tauri::command]
+fn clear_openai_key() -> Result<(), String> {
+    clear_key(KEYRING_USER_OPENAI)
+}
+
+#[tauri::command]
+fn set_openai_compat_key(key: String) -> Result<(), String> {
+    set_key(KEYRING_USER_OPENAI_COMPAT, &key)
+}
+
+#[tauri::command]
+fn has_openai_compat_key() -> Result<bool, String> {
+    has_key(KEYRING_USER_OPENAI_COMPAT)
+}
+
+#[tauri::command]
+fn clear_openai_compat_key() -> Result<(), String> {
+    clear_key(KEYRING_USER_OPENAI_COMPAT)
+}
+
+#[tauri::command]
 fn set_cloudflare_key(key: String) -> Result<(), String> {
     set_key(KEYRING_USER_CLOUDFLARE, &key)
 }
@@ -462,13 +512,15 @@ async fn transcribe_chunk(
     .map_err(|e| e.to_string())?
 }
 
-// ---------- Gemini drafting ----------
+// ---------- AI drafting ----------
+// One command for every provider; the frontend passes the provider the user
+// picked in Settings. `base_url` is only used by "openai_compat".
 
-fn check_gemini_input(system: &str, prompt: &str) -> Result<(), String> {
+fn check_ai_input(system: &str, prompt: &str) -> Result<(), String> {
     let n = system.len() + prompt.len();
-    if n > GEMINI_MAX_INPUT_BYTES {
+    if n > AI_MAX_INPUT_BYTES {
         return Err(format!(
-            "prompt too large: {n} bytes (limit {GEMINI_MAX_INPUT_BYTES})"
+            "prompt too large: {n} bytes (limit {AI_MAX_INPUT_BYTES})"
         ));
     }
     Ok(())
@@ -476,11 +528,40 @@ fn check_gemini_input(system: &str, prompt: &str) -> Result<(), String> {
 
 /// Returns the model's raw text (a JSON string; the frontend parses it).
 #[tauri::command]
-async fn gemini_draft(model: String, system: String, prompt: String) -> Result<String, String> {
-    check_gemini_input(&system, &prompt)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let key = get_key(KEYRING_USER_GEMINI, "Gemini")?;
-        gemini::send(gemini::API_BASE, &key, &model, &system, &prompt)
+async fn ai_draft(
+    provider: String,
+    model: String,
+    base_url: String,
+    system: String,
+    prompt: String,
+) -> Result<String, String> {
+    check_ai_input(&system, &prompt)?;
+    tauri::async_runtime::spawn_blocking(move || match provider.as_str() {
+        "claude" => {
+            let key = get_key(KEYRING_USER_CLAUDE, "Claude")?;
+            claude::send(claude::API_BASE, &key, &model, &system, &prompt)
+        }
+        "openai" => {
+            let key = get_key(KEYRING_USER_OPENAI, "OpenAI")?;
+            openai::send(openai::API_BASE, &key, &model, &system, &prompt)
+        }
+        "openai_compat" => {
+            let base = base_url.trim();
+            if base.is_empty() {
+                return Err(
+                    "OpenAI Compatible needs a base URL (e.g. https://nano-gpt.com/api/v1)".into(),
+                );
+            }
+            if !(base.starts_with("http://") || base.starts_with("https://")) {
+                return Err("base URL must start with http:// or https://".into());
+            }
+            let key = get_key(KEYRING_USER_OPENAI_COMPAT, "OpenAI Compatible")?;
+            openai::send(base, &key, &model, &system, &prompt)
+        }
+        _ => {
+            let key = get_key(KEYRING_USER_GEMINI, "Gemini")?;
+            gemini::send(gemini::API_BASE, &key, &model, &system, &prompt)
+        }
     })
     .await
     .map_err(|e| e.to_string())?
@@ -534,7 +615,16 @@ pub fn run() {
             set_gemini_key,
             has_gemini_key,
             clear_gemini_key,
-            gemini_draft,
+            set_claude_key,
+            has_claude_key,
+            clear_claude_key,
+            set_openai_key,
+            has_openai_key,
+            clear_openai_key,
+            set_openai_compat_key,
+            has_openai_compat_key,
+            clear_openai_compat_key,
+            ai_draft,
             set_cloudflare_key,
             has_cloudflare_key,
             clear_cloudflare_key,
@@ -566,11 +656,11 @@ mod tests {
     }
 
     #[test]
-    fn gemini_input_cap() {
-        assert!(check_gemini_input("s", "p").is_ok());
-        let half = "a".repeat(GEMINI_MAX_INPUT_BYTES / 2);
-        assert!(check_gemini_input(&half, &half).is_ok());
-        let e = check_gemini_input(&half, &format!("{half}x")).unwrap_err();
+    fn ai_input_cap() {
+        assert!(check_ai_input("s", "p").is_ok());
+        let half = "a".repeat(AI_MAX_INPUT_BYTES / 2);
+        assert!(check_ai_input(&half, &half).is_ok());
+        let e = check_ai_input(&half, &format!("{half}x")).unwrap_err();
         assert!(e.contains("too large"), "{e}");
     }
 
