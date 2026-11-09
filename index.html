@@ -9,6 +9,11 @@
   <body>
     <header>
       <h1>Review App</h1>
+      <button id="nav-library" hidden>← Library</button>
+      <div id="queue-bar" class="queue-bar" hidden>
+        <span id="qb-pos"></span>
+        <button id="qb-next">Work next in queue →</button>
+      </div>
       <details id="settings">
         <summary>Settings</summary>
         <label>Deepgram API key
@@ -40,8 +45,54 @@
       </details>
     </header>
 
+    <!-- 0. Library -->
+    <section id="screen-library" class="screen">
+      <div class="lib-toolbar">
+        <div class="lib-actions">
+          <button id="lib-pick">Pick recordings</button>
+          <label>Event <input id="lib-event" type="text" placeholder="e.g. Demo Day Nov 2026" /></label>
+          <label><input id="lib-demo" type="checkbox" /> Demo-day mode (rapid review + queue)</label>
+        </div>
+        <div class="lib-search-box">
+          <input id="lib-search" type="search" placeholder="Search by game or event…" />
+          <span id="lib-count"></span>
+        </div>
+      </div>
+
+      <div id="lib-drop" class="drop">Drop OBS recordings here (or click Pick recordings above)</div>
+      <p id="lib-status" class="hint"></p>
+      <p id="lib-error" class="error"></p>
+
+      <div id="queue-box" class="queue-box" hidden>
+        <div class="q-header">
+          <strong>Demo-day queue:</strong> <span id="q-summary"></span>
+          <div class="q-actions">
+            <button id="q-next">Work next →</button>
+            <button id="q-clear">Clear finished</button>
+          </div>
+        </div>
+        <ol id="q-list" class="q-list"></ol>
+      </div>
+
+      <table class="lib-table">
+        <thead>
+          <tr>
+            <th>Game title</th>
+            <th>Event</th>
+            <th>Date</th>
+            <th>Length</th>
+            <th>Status</th>
+            <th>Points</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="lib-rows"></tbody>
+      </table>
+      <p id="lib-empty" class="hint" hidden>No sessions found. Drop recordings above or click Pick recordings.</p>
+    </section>
+
     <!-- 1. Import -->
-    <section id="screen-import" class="screen">
+    <section id="screen-import" class="screen" hidden>
       <div id="drop" class="drop">Drop an OBS MKV here</div>
       <div id="import-info" hidden>
         <table>

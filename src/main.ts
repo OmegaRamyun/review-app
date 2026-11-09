@@ -17,17 +17,12 @@ import {
 import {
   chooseSlug, hookLine, itchComment, normalizeSiteBase, parseSiteEntries, renderIndex, reviewUrl, upsertEntry,
 } from "./publish";
+import {
+  enqueue, fileStem, fmtDate, isFinished, newSessionId, nextInQueue, parseQueue, parseSession, pruneQueue,
+  searchRows, toRows, type LibraryRow, type Session, type SessionSummary,
+} from "./library";
 
 interface MediaInfo { path: string; size_bytes: number }
-
-interface Session {
-  id: string;
-  title: string;
-  recording_path: string;
-  date: string;
-  mode: Mode;
-  mic_track: number;
-}
 
 interface TranscriptFile {
   model: string;
@@ -43,6 +38,9 @@ const LS_GEMINI_MODEL = "ra.geminiModel";
 const LS_CF_ACCOUNT = "ra.cfAccount";
 const LS_CF_PROJECT = "ra.cfProject";
 const LS_CF_SITE = "ra.cfSite";
+const LS_QUEUE = "ra.queue";
+const LS_EVENT = "ra.event";
+const LS_DEMO = "ra.demoDay";
 
 // ---------- settings ----------
 const modelInput = $<HTMLInputElement>("dg-model");
@@ -98,28 +96,325 @@ $("gm-clear").addEventListener("click", async () => {
 void refreshGeminiStatus();
 
 // ---------- screens ----------
-function show(name: "import" | "transcribe" | "scrub" | "assemble" | "publish") {
-  for (const s of ["import", "transcribe", "scrub", "assemble", "publish"]) $(`screen-${s}`).hidden = s !== name;
+type Screen = "library" | "import" | "transcribe" | "scrub" | "assemble" | "publish";
+const SCREENS: readonly Screen[] = ["library", "import", "transcribe", "scrub", "assemble", "publish"];
+let current: Screen = "library";
+function show(name: Screen) {
+  current = name;
+  for (const s of SCREENS) $(`screen-${s}`).hidden = s !== name;
+  $("nav-library").hidden = name === "library";
+  void refreshQueueBar();
 }
 
-// ---------- 1. Import ----------
+// ---------- session state ----------
+let session: Session | null = null;
+let transcript: TranscriptFile | null = null;
 let media: MediaInfo | null = null;
 let probed: Probe | null = null;
 
-async function onDrop(paths: string[]) {
-  $("import-error").textContent = "";
-  $("import-info").hidden = true;
-  const path = paths[0];
-  if (!path) return;
+const sessionJson = (s: Session) => JSON.stringify(s, null, 2);
+const saveSessionObj = (s: Session) => invoke("save_session_file", { id: s.id, name: "session.json", contents: sessionJson(s) });
+
+/** Leave the open session: flush the review, stop playback, drop the media handle. */
+async function closeSession() {
+  if (session) await writeReview();
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  probed?.input.dispose();
+  probed = null;
+  media = null;
+}
+
+// ---------- 0. Library + demo-day queue ----------
+let rows: LibraryRow[] = [];
+let queue = parseQueue(localStorage.getItem(LS_QUEUE));
+const saveQueue = () => localStorage.setItem(LS_QUEUE, JSON.stringify(queue));
+const statusOf = (id: string) => rows.find((r) => r.session.id === id)?.status;
+
+const libEvent = $<HTMLInputElement>("lib-event");
+libEvent.value = localStorage.getItem(LS_EVENT) ?? "";
+libEvent.addEventListener("change", () => localStorage.setItem(LS_EVENT, libEvent.value.trim()));
+const libDemo = $<HTMLInputElement>("lib-demo");
+libDemo.checked = localStorage.getItem(LS_DEMO) === "1";
+libDemo.addEventListener("change", () => localStorage.setItem(LS_DEMO, libDemo.checked ? "1" : ""));
+const libSearch = $<HTMLInputElement>("lib-search");
+libSearch.addEventListener("input", () => renderLibrary());
+
+async function refreshLibrary() {
   try {
-    probed?.input.dispose();
-    probed = null;
-    media = await invoke<MediaInfo>("open_media", { path });
-    probed = await probe(media.path);
+    rows = toRows(await invoke<SessionSummary[]>("list_sessions"));
   } catch (e) {
-    $("import-error").textContent = `Could not read ${path}\n${String(e)}`;
+    $("lib-error").textContent = `Could not read the sessions folder: ${String(e)}`;
     return;
   }
+  const known = new Set(rows.map((r) => r.session.id));
+  const pruned = pruneQueue(queue, known);
+  if (pruned.length !== queue.length) {
+    queue = pruned;
+    saveQueue();
+  }
+  renderLibrary();
+  renderQueue();
+}
+
+function cell(...kids: (Node | string)[]): HTMLTableCellElement {
+  const td = document.createElement("td");
+  td.append(...kids);
+  return td;
+}
+
+/** Inline edit of a session's title/event; keeps the open session's in-memory copy in step. */
+function editField(r: LibraryRow, key: "title" | "event", placeholder: string): HTMLInputElement {
+  const el = document.createElement("input");
+  el.type = "text";
+  el.value = r.session[key];
+  el.placeholder = placeholder;
+  el.addEventListener("change", async () => {
+    const target = session?.id === r.session.id ? session : r.session;
+    target[key] = r.session[key] = el.value.trim();
+    try {
+      await saveSessionObj(target);
+    } catch (e) {
+      $("lib-error").textContent = `Could not save session.json: ${String(e)}`;
+    }
+    renderQueue();
+  });
+  return el;
+}
+
+function renderLibrary() {
+  const shown = searchRows(rows, libSearch.value);
+  $("lib-count").textContent = `${shown.length} of ${rows.length} session${rows.length === 1 ? "" : "s"}`;
+  $("lib-empty").hidden = rows.length > 0;
+  $("lib-rows").replaceChildren(...shown.map((r) => {
+    const tr = document.createElement("tr");
+    tr.classList.toggle("current", r.session.id === session?.id);
+    const status = document.createElement("span");
+    status.className = `status st-${r.status.replace(/ /g, "-")}`;
+    status.textContent = r.status;
+    if (r.partial_transcript && r.status === "imported") status.title = "Transcription started; opening resumes it";
+    const length = r.session.duration ? fmtTime(r.session.duration) : "—";
+    const open = document.createElement("button");
+    open.textContent = "Open";
+    open.addEventListener("click", () => void openSession(r.session.id));
+    const q = document.createElement("button");
+    const inQueue = queue.includes(r.session.id);
+    q.textContent = inQueue ? "Unqueue" : "Queue";
+    q.title = inQueue ? "Remove from the demo-day queue" : "Add to the end of the demo-day queue";
+    q.addEventListener("click", () => {
+      queue = inQueue ? queue.filter((id) => id !== r.session.id) : enqueue(queue, [r.session.id]);
+      saveQueue();
+      renderLibrary();
+      renderQueue();
+    });
+    const actions = cell(open, " ", q);
+    if (!r.recording_exists) {
+      const warn = document.createElement("div");
+      warn.className = "error";
+      warn.textContent = "recording missing";
+      warn.title = r.session.recording_path;
+      actions.append(warn);
+    }
+    tr.append(
+      cell(editField(r, "title", "game title")), cell(editField(r, "event", "event")),
+      cell(fmtDate(r.session.date)), cell(length), cell(status), cell(String(r.points)), actions,
+    );
+    return tr;
+  }));
+}
+
+function renderQueue() {
+  const box = $("queue-box");
+  box.hidden = queue.length === 0 && !libDemo.checked;
+  const done = queue.filter((id) => isFinished(statusOf(id) ?? "imported")).length;
+  $("q-summary").textContent = queue.length ? `${done} of ${queue.length} done` : "empty — drop recordings with demo-day mode on, or Queue rows below";
+  $("q-list").replaceChildren(...queue.map((id, i) => {
+    const r = rows.find((x) => x.session.id === id);
+    const li = document.createElement("li");
+    li.classList.toggle("current", id === session?.id);
+    li.classList.toggle("finished", isFinished(r?.status ?? "imported"));
+    const name = document.createElement("button");
+    name.className = "linkish";
+    name.textContent = r?.session.title || id;
+    name.addEventListener("click", () => void openSession(id));
+    const up = document.createElement("button");
+    up.textContent = "↑";
+    up.title = "Move up";
+    up.disabled = i === 0;
+    up.addEventListener("click", () => {
+      [queue[i - 1], queue[i]] = [queue[i], queue[i - 1]];
+      saveQueue();
+      renderQueue();
+    });
+    const rm = document.createElement("button");
+    rm.textContent = "×";
+    rm.title = "Remove from queue (the session stays in the library)";
+    rm.addEventListener("click", () => {
+      queue = queue.filter((x) => x !== id);
+      saveQueue();
+      renderLibrary();
+      renderQueue();
+    });
+    li.append(name, ` — ${r?.status ?? "?"}${r?.session.event ? ` · ${r.session.event}` : ""} `, up, rm);
+    return li;
+  }));
+  const next = nextInQueue(queue, statusOf, session?.id ?? null);
+  const b = $<HTMLButtonElement>("q-next");
+  b.disabled = !next;
+  b.textContent = next ? `Work next: ${rows.find((x) => x.session.id === next)?.session.title || next} →` : "Queue finished";
+  $<HTMLButtonElement>("q-clear").disabled = done === 0;
+}
+
+/** Header strip while a session is open: queue progress + jump to the next unfinished recording. */
+async function refreshQueueBar() {
+  const bar = $("queue-bar");
+  const inQueue = !!session && queue.includes(session.id) && current !== "library";
+  bar.hidden = !inQueue;
+  if (!inQueue) return;
+  const pos = queue.indexOf(session!.id) + 1;
+  $("qb-pos").textContent = `Demo day: ${pos} of ${queue.length}`;
+  const next = nextInQueue(queue, statusOf, session?.id ?? null);
+  const btn = $<HTMLButtonElement>("qb-next");
+  btn.disabled = !next;
+  btn.textContent = next ? `Work next: ${rows.find((x) => x.session.id === next)?.session.title || next} →` : "Queue finished";
+}
+
+$("q-next").addEventListener("click", () => void workNext());
+$("qb-next").addEventListener("click", () => void workNext());
+$("q-clear").addEventListener("click", () => {
+  queue = queue.filter((id) => !isFinished(statusOf(id) ?? "imported"));
+  saveQueue();
+  renderLibrary();
+  renderQueue();
+});
+
+async function workNext() {
+  await refreshLibrary(); // statuses change as the current session is worked
+  const next = nextInQueue(queue, statusOf, session?.id ?? null);
+  if (!next) {
+    $("lib-status").textContent = "Every queued recording is done.";
+    await openLibrary();
+    return;
+  }
+  await openSession(next);
+}
+
+async function openLibrary() {
+  await closeSession();
+  show("library");
+  await refreshLibrary();
+}
+$("nav-library").addEventListener("click", () => void openLibrary());
+void openLibrary();
+
+/** New sessions from dropped/picked recordings: probe each for its length, write session.json. */
+async function addRecordings(paths: string[]) {
+  if (!paths.length) return;
+  const status = $("lib-status"), errors: string[] = [];
+  $("lib-error").textContent = "";
+  const demo = libDemo.checked;
+  const taken = new Set(rows.map((r) => r.session.id));
+  const added: string[] = [];
+  for (const [i, path] of paths.entries()) {
+    status.textContent = `Reading ${i + 1}/${paths.length}: ${fileStem(path)}…`;
+    try {
+      const info = await invoke<MediaInfo>("open_media", { path });
+      const p = await probe(info.path);
+      const audio = p.audio.length;
+      p.input.dispose();
+      const s: Session = {
+        id: newSessionId(info.path, new Date(), taken), title: fileStem(info.path), event: libEvent.value.trim(),
+        recording_path: info.path, date: new Date().toISOString(), mode: demo ? "rapid" : "full",
+        mic_track: defaultMicTrack(audio, Number(localStorage.getItem(LS_MIC)) || null) ?? 2, duration: p.duration,
+      };
+      await saveSessionObj(s);
+      taken.add(s.id);
+      added.push(s.id);
+    } catch (e) {
+      errors.push(`${path}: ${String(e)}`);
+    }
+  }
+  if (demo) {
+    queue = enqueue(queue, added);
+    saveQueue();
+  }
+  status.textContent = added.length
+    ? `Added ${added.length} session${added.length === 1 ? "" : "s"}${demo ? " to the demo-day queue (rapid mode)" : ""}.`
+    : "";
+  if (errors.length) $("lib-error").textContent = `Could not import:\n${errors.join("\n")}`;
+  await refreshLibrary();
+  // A single new recording opens straight away — unless queueing for demo day, or mid-work elsewhere.
+  if (!demo && added.length === 1 && (current === "library" || current === "import")) await openSession(added[0]);
+  else if (current !== "library") void refreshQueueBar();
+}
+
+$("lib-pick").addEventListener("click", async () => {
+  try {
+    await addRecordings(await invoke<string[]>("pick_recordings"));
+  } catch (e) {
+    $("lib-error").textContent = `File picker failed: ${String(e)}`;
+  }
+});
+
+const dropEls = [document.getElementById("lib-drop"), document.getElementById("drop")].filter((el): el is HTMLElement => !!el);
+void getCurrentWebview().onDragDropEvent((event) => {
+  const p = event.payload;
+  const over = p.type === "over" || p.type === "enter";
+  for (const el of dropEls) el.classList.toggle("over", over);
+  if (p.type === "drop") void addRecordings(p.paths);
+});
+
+function parseTranscript(json: string | null): TranscriptFile | null {
+  if (!json) return null;
+  try {
+    const t = JSON.parse(json) as TranscriptFile;
+    return Array.isArray(t.words) && Array.isArray(t.chunks) ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Open a session where its work stands: not transcribed → Import (mic pick / resume), else Scrub. */
+async function openSession(id: string) {
+  await closeSession();
+  $("lib-error").textContent = "";
+  let s: Session, txt: string | null;
+  try {
+    const json = await invoke<string | null>("load_session_file", { id, name: "session.json" });
+    if (!json) throw new Error("session.json is missing");
+    s = parseSession(json, id);
+    s.id = id;
+    transcript = parseTranscript(await invoke<string | null>("load_session_file", { id, name: "transcript.json" }));
+    txt = await invoke<string | null>("load_session_file", { id, name: "transcript.txt" });
+  } catch (e) {
+    $("lib-error").textContent = `Could not open ${id}: ${String(e)}`;
+    show("library");
+    return;
+  }
+  session = s;
+  let mediaError = "";
+  try {
+    media = await invoke<MediaInfo>("open_media", { path: s.recording_path });
+    probed = await probe(media.path);
+  } catch (e) {
+    media = probed = null;
+    mediaError = `Recording not readable at ${s.recording_path}\n${String(e)}`;
+  }
+  if (txt !== null && transcript) {
+    await openScrub(s.recording_path, transcript.words, !!media);
+    if (mediaError) $("v-error").textContent = `${mediaError}\nPoints and the review still work — Assemble → is below.`;
+  } else {
+    showImport(mediaError);
+  }
+}
+
+// ---------- 1. Import (mic track for the open session) ----------
+function showImport(error = "") {
+  $("import-error").textContent = error;
+  $("import-info").hidden = !media || !probed;
+  show("import");
+  if (!media || !probed || !session) return;
   const p = probed;
   $("i-name").textContent = media.path.split(/[\\/]/).pop() ?? media.path;
   $("i-path").textContent = media.path;
@@ -127,7 +422,8 @@ async function onDrop(paths: string[]) {
   $("i-dur").textContent = fmtTime(p.duration);
   $("i-res").textContent = p.width ? `${p.width}×${p.height} (${p.videoCodec ?? "?"})` : "no video track";
   const remembered = Number(localStorage.getItem(LS_MIC)) || null;
-  const def = defaultMicTrack(p.audio.length, remembered);
+  const saved = p.audio.some((t) => t.number === session!.mic_track) ? session.mic_track : null;
+  const def = saved ?? defaultMicTrack(p.audio.length, remembered);
   const box = $("i-tracks");
   box.replaceChildren();
   if (!p.audio.length) box.textContent = "No audio tracks found.";
@@ -143,30 +439,14 @@ async function onDrop(paths: string[]) {
     label.append(radio, ` Track ${t.number}${t.name ? ` “${t.name}”` : ""} — ${t.codec ?? "?"}, ${t.channels} ch, ${t.sampleRate} Hz`);
     box.append(label);
   }
+  const resumable = !!transcript?.chunks.length;
+  $<HTMLButtonElement>("b-transcribe").textContent = resumable ? "Resume transcription" : "Transcribe";
   $<HTMLButtonElement>("b-transcribe").disabled = !p.audio.length;
-  $("import-info").hidden = false;
 }
-
-const dropEl = $("drop");
-void getCurrentWebview().onDragDropEvent((event) => {
-  const p = event.payload;
-  if (p.type === "over" || p.type === "enter") dropEl.classList.add("over");
-  else dropEl.classList.remove("over");
-  if (p.type === "drop") void onDrop(p.paths);
-});
 
 // ---------- 2. Transcribe ----------
-let session: Session | null = null;
-let transcript: TranscriptFile | null = null;
-
-function newSessionId(path: string): string {
-  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
-  const slug = (path.split(/[\\/]/).pop() ?? "rec").replace(/\.[^.]*$/, "").replace(/[^A-Za-z0-9_-]+/g, "-");
-  return `${stamp}-${slug}`.slice(0, 64);
-}
-
 $("b-transcribe").addEventListener("click", async () => {
-  if (!media || !probed) return;
+  if (!media || !probed || !session) return;
   if (!(await invoke<boolean>("has_deepgram_key").catch(() => false))) {
     $("import-error").textContent = "Enter your Deepgram API key in Settings first.";
     $<HTMLDetailsElement>("settings").open = true;
@@ -174,13 +454,12 @@ $("b-transcribe").addEventListener("click", async () => {
   }
   const mic = Number(document.querySelector<HTMLInputElement>('input[name="mic"]:checked')?.value ?? 2);
   localStorage.setItem(LS_MIC, String(mic));
-  const title = (media.path.split(/[\\/]/).pop() ?? "").replace(/\.[^.]*$/, "");
-  session = {
-    id: newSessionId(media.path), title, recording_path: media.path,
-    date: new Date().toISOString(), mode: "full", mic_track: mic,
-  };
-  await invoke("save_session_file", { id: session.id, name: "session.json", contents: JSON.stringify(session, null, 2) });
-  transcript = { model: model(), duration: probed.duration, chunks: [], words: [] };
+  // Resume only what was transcribed from the same track with the same model; anything else starts over.
+  const resume = transcript && transcript.chunks.length && session.mic_track === mic && transcript.model === model();
+  session.mic_track = mic;
+  session.duration = probed.duration;
+  await saveSessionObj(session);
+  if (!resume) transcript = { model: model(), duration: probed.duration, chunks: [], words: [] };
   show("transcribe");
   void runTranscription();
 });
@@ -260,7 +539,7 @@ function onFrame(_now: DOMHighResTimeStamp, meta: VideoFrameCallbackMetadata) {
   video.requestVideoFrameCallback(onFrame);
 }
 
-async function openScrub(path: string, words: Word[]) {
+async function openScrub(path: string, words: Word[], playable = true) {
   lines = groupLines(words);
   const list = $("lines");
   lineEls = lines.map((l, i) => {
@@ -289,8 +568,10 @@ async function openScrub(path: string, words: Word[]) {
   corsRetried = false;
   // crossOrigin so drawImage(video) leaves the canvas untainted (media scheme sends ACAO *).
   video.crossOrigin = "anonymous";
-  video.src = mediaUrl(path);
-  video.requestVideoFrameCallback(onFrame);
+  if (playable) {
+    video.src = mediaUrl(path);
+    video.requestVideoFrameCallback(onFrame);
+  }
   await loadPoints();
   show("scrub");
 }

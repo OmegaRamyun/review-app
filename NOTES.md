@@ -468,3 +468,62 @@ built but not clicked through in a webview.
    both clipboard paths. Tell me.
 8. **Custom domain (optional):** set Site URL to your domain; the next
    publish's link and comment should use it.
+
+## U5: Library + demo-day queue
+
+**What it does:**
+
+- **Library screen:** the app now boots directly into the Library screen (`screen-library`), listing every session found in `%APPDATA%\app.reviewapp.desktop\sessions\<id>\`.
+- **Session folder layout:** each session is an isolated directory containing:
+  - `session.json`: `{id, title, event, recording_path, date, mode, mic_track, duration}`
+  - `mic-NNN.wav`: extracted mic audio chunks (16 kHz mono)
+  - `transcript.json` / `transcript.txt`: Deepgram word timestamps and plain transcript
+  - `points.json`: review points with timestamps and bucket assignments
+  - `shot-*.jpg`: screenshots grabbed during scrubbing
+  - `review.json`: draft/final review prose, verdict, who-for, score, and publish state
+- **Table columns:** Game title (editable inline), Event (editable inline), Date (`YYYY-MM-DD HH:MM`), Clip length (formatted `m:ss` or `h:mm:ss`), Status badge, Points count, and Actions (`Open`, `Queue`/`Unqueue`, plus a `recording missing` warning if the video file path no longer exists).
+- **Status ladder** (`deriveStatus` in `src/library.ts`):
+  - `imported`: session registered, not transcribed yet
+  - `transcribed`: `transcript.txt` exists
+  - `points pinned`: `points.json` contains at least one point
+  - `review done`: all bucket sections have prose, verdict is written, and no unreviewed AI drafts remain (or review was exported)
+  - `published`: review was published to Cloudflare Pages
+- **Searchable by game/event:** case-insensitive multi-term search filtering against title and event fields simultaneously (`searchRows`).
+- **New session intake:**
+  - **Drag and drop:** dropping files onto `#lib-drop` (or anywhere on the window) probes media length via Mediabunny and creates `session.json`.
+  - **Native file picker:** `Pick recordings` button calls Tauri `pick_recordings` (`tauri-plugin-dialog`), opening a native modal multi-file dialog with filters (`*.mkv`, `*.mp4`, `*.mov`, `*.webm`).
+  - **Single recording (normal mode):** automatically opens the session immediately (to Scrub if already transcribed, or Import if mic track needs selection).
+  - **Demo-day mode:** checkbox sets rapid review mode (`mode: "rapid"`) and enqueues imported recordings directly into the demo-day queue.
+- **Demo-day queue:**
+  - Persisted in `localStorage["ra.queue"]`.
+  - In Library: `#queue-box` displays queued items with progress (`X of Y done`), reorder `↑`, unqueue `×`, `Work next →` button, and `Clear finished`. Completed sessions are crossed out.
+  - Across active screens: persistent `#queue-bar` in the header shows current position (`Demo day: 1 of 5`) and a dynamic `Work next: <title> →` button to advance to the next unfinished session.
+  - When all queued sessions are finished, the app reports `"Every queued recording is done."` and returns to the library.
+- **Header navigation:** `← Library` button (`#nav-library`) is visible on every non-library screen (Import, Transcribe, Scrub, Assemble, Publish) to safely save edits and return to the library.
+- **Backend resilience:** `list_sessions_in` in Rust safely skips non-directory or invalid-id entries, gracefully ignores damaged optional files (`read_optional`), and verifies recording existence on disk without loading large transcript JSONs into memory.
+
+**Verified here:**
+- `bash ops/check.sh` passes (typecheck + vite build + cargo build).
+- `npm run test:unit` passes 29/29 tests (including 6 library unit tests covering status ladder, pre-U5 session backwards compatibility, search filtering, queue enqueue/pruning/wrap-around, and filename sanitization).
+- `cargo test` passes 24/24 tests (including `list_sessions_scans_valid_dirs`).
+
+## What Cade must verify on Windows (U5)
+
+1. **Boot into Library:** run `npm run tauri dev`. The app should open into the Library screen, showing the session table (or "No sessions found" if fresh) with the top toolbar (Pick recordings, Event, Demo-day mode, Search).
+2. **Native file picker:** click `Pick recordings`. Windows File Open dialog should open, modal to the main window, with file filters for `Recordings (*.mkv, *.mp4, *.mov, *.webm)` and `All files (*.*)`. Select one or multiple OBS recordings.
+3. **Single drop/pick (normal mode):** pick or drop a single recording with Demo-day mode unchecked. The app should probe it, create the session folder, and immediately open it into the Import or Scrub screen.
+4. **Header navigation:** on the Import/Scrub screen, click `← Library` in the top bar. The app should return to the library, and the new session should be listed in the table with its title, date, duration, and status.
+5. **Inline editing:** click into the Game title or Event input in any table row and type a new name. Click outside or press Enter. Check `%APPDATA%\app.reviewapp.desktop\sessions\<id>\session.json` to verify the new title/event persisted.
+6. **Search:** type a game name or event keyword into the search box. The table should filter in real-time and update the `X of Y sessions` count.
+7. **Demo-day mode queue:**
+   - Tick `Demo-day mode (rapid review + queue)`.
+   - Enter an event name (e.g. `Demo Day Nov 2026`).
+   - Pick or drop 2–3 recordings.
+   - Verify they are added to the table with `rapid` mode and appear in the `Demo-day queue` box above the table.
+   - Use `↑` to reorder items in the queue.
+   - Click `Work next →` on the queue box: it should open the first recording.
+8. **Queue bar progression:**
+   - While working on the session (Import → Transcribe → Scrub → Assemble), check the header: it should display `Demo day: 1 of N` and `Work next: <Game 2> →`.
+   - Complete the review (or click `Work next`). It should cleanly flush `review.json` and advance to the next session.
+   - Once all queued sessions are finished, clicking `Work next` should return to the library with "Every queued recording is done." and completed sessions crossed out in the queue list.
+

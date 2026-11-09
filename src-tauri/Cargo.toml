@@ -22,6 +22,8 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # asset keys must be wrangler's exact BLAKE3 hash or uploads 404 silently.
 # `pure` = portable Rust only, no C/asm build step on Windows.
 blake3 = { version = "1", default-features = false, features = ["std", "pure"] }
+# Native file picker (DESIGN.md: "new session: drop a file or pick one"; Import: "Drop zone + file picker" returning a real path).
+tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

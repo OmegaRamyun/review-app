@@ -61,3 +61,33 @@ progress { width: 100%; }
 .publish textarea { width: 100%; box-sizing: border-box; font: 0.95rem/1.4 "Courier New", monospace; }
 .publish .path { word-break: break-all; font-size: 0.85rem; }
 .mono { font-family: "Courier New", monospace; }
+
+/* Library & Demo-Day Queue */
+.lib-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.8rem; margin-bottom: 0.8rem; }
+.lib-actions { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; }
+.lib-search-box { display: flex; align-items: center; gap: 0.5rem; }
+.lib-search-box input { width: 14rem; }
+.lib-table { width: 100%; border-collapse: collapse; margin-top: 1rem; background: #fff; border: 1px solid #ccc; }
+.lib-table th { background: #eee; padding: 0.5rem 0.6rem; border-bottom: 1px solid #ccc; font-size: 0.85rem; }
+.lib-table td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; font-size: 0.9rem; }
+.lib-table tr:hover { background: #fdfae6; }
+.lib-table tr.current { background: #fff1b8; font-weight: 500; }
+.lib-table input[type="text"] { border: 1px solid transparent; background: transparent; font: inherit; padding: 0.2rem 0.3rem; border-radius: 2px; }
+.lib-table input[type="text"]:focus, .lib-table input[type="text"]:hover { border-color: #aaa; background: #fff; }
+
+.status { display: inline-block; padding: 0.15rem 0.45rem; border-radius: 3px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase; font-family: "Courier New", monospace; white-space: nowrap; }
+.st-imported { background: #e0e0e0; color: #444; }
+.st-transcribed { background: #d0e8ff; color: #003a70; }
+.st-points-pinned { background: #fff0b3; color: #7a5200; }
+.st-review-done { background: #d2f0d2; color: #164f16; }
+.st-published { background: #b8e6c1; color: #0b4f1b; }
+
+.queue-box { background: #fff; border: 1px solid #ccc; padding: 0.8rem 1rem; margin: 1rem 0; }
+.q-header { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.q-actions { margin-left: auto; display: flex; gap: 0.5rem; }
+.q-list { margin: 0; padding-left: 1.5rem; }
+.q-list li { padding: 0.25rem 0; }
+.q-list li.finished { color: #888; }
+.q-list li.finished .linkish { text-decoration: line-through; color: #888; }
+.q-list li.current { font-weight: bold; }
+.queue-bar { display: flex; gap: 0.6rem; align-items: center; background: #ffe58a; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.85rem; font-weight: 500; }

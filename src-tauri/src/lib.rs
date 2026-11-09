@@ -138,6 +138,102 @@ fn delete_session_file(app: AppHandle, id: String, name: String) -> Result<(), S
     }
 }
 
+#[derive(Serialize, Debug)]
+struct SessionSummary {
+    id: String,
+    /// Raw session.json.
+    session: String,
+    /// Raw points.json, if present.
+    points: Option<String>,
+    /// Raw review.json, if present.
+    review: Option<String>,
+    /// transcript.txt exists (written only when transcription completes).
+    transcribed: bool,
+    /// transcript.json exists (never read here: can be large).
+    partial_transcript: bool,
+    /// session.json's `recording_path` is an existing file.
+    recording_exists: bool,
+}
+
+fn read_optional(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+/// One summary per valid-id dir with a readable session.json. Missing root → empty.
+fn list_sessions_in(root: &Path) -> Result<Vec<SessionSummary>, String> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(it) => it,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let dir = entry.path();
+        if !valid_id(&id) || !dir.is_dir() {
+            continue;
+        }
+        let Ok(session) = std::fs::read_to_string(dir.join("session.json")) else {
+            continue;
+        };
+        let recording_exists = serde_json::from_str::<serde_json::Value>(&session)
+            .ok()
+            .and_then(|v| v.get("recording_path")?.as_str().map(|p| Path::new(p).is_file()))
+            .unwrap_or(false);
+        out.push(SessionSummary {
+            points: read_optional(&dir.join("points.json")),
+            review: read_optional(&dir.join("review.json")),
+            transcribed: dir.join("transcript.txt").is_file(),
+            partial_transcript: dir.join("transcript.json").is_file(),
+            recording_exists,
+            session,
+            id,
+        });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+async fn list_sessions(app: AppHandle) -> Result<Vec<SessionSummary>, String> {
+    let root = sessions_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || list_sessions_in(&root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Native multi-file open dialog; absolute paths, empty on cancel.
+#[tauri::command]
+async fn pick_recordings(app: AppHandle, window: tauri::WebviewWindow) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        // Parented to the calling window so it is modal and stays on top (Windows).
+        let picked = app
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("Pick recordings")
+            .add_filter("Recordings", &["mkv", "mp4", "mov", "webm"])
+            .add_filter("All files", &["*"])
+            .blocking_pick_files();
+        let Some(files) = picked else {
+            return Ok(Vec::new());
+        };
+        files
+            .into_iter()
+            .map(|f| {
+                f.into_path()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .map_err(|e| e.to_string())
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------- site export (local folder = the publish source + manual-upload fallback) ----------
 // Layout under app data: site/index.html, site/reviews.json (local-only index of
 // entries; never uploaded), site/<slug>/index.html, site/<slug>/shots/<jpg>.
@@ -395,6 +491,7 @@ async fn gemini_draft(model: String, system: String, prompt: String) -> Result<S
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(MediaState::default())
         .register_asynchronous_uri_scheme_protocol("media", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
@@ -428,6 +525,8 @@ pub fn run() {
             save_session_bytes,
             load_session_bytes,
             delete_session_file,
+            list_sessions,
+            pick_recordings,
             set_deepgram_key,
             has_deepgram_key,
             clear_deepgram_key,
@@ -495,6 +594,66 @@ mod tests {
             assert!(export_into(&site, &sess, slug, "", &[shot.to_string()], "", "{}").is_err(), "{slug} {shot}");
         }
         assert!(export_into(&site, &sess, "ok", "", &[], "", "not json").is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn list_sessions_scans_valid_dirs() {
+        let root = std::env::temp_dir().join(format!("ra-list-{}", std::process::id()));
+        let sessions = root.join("sessions");
+        let rec = root.join("rec.mkv");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(&rec, b"mkv").unwrap();
+
+        let full = sessions.join("full_1");
+        std::fs::create_dir_all(&full).unwrap();
+        let full_session = serde_json::json!({ "recording_path": rec.to_string_lossy() }).to_string();
+        std::fs::write(full.join("session.json"), &full_session).unwrap();
+        std::fs::write(full.join("points.json"), "[1]").unwrap();
+        std::fs::write(full.join("review.json"), "{\"r\":1}").unwrap();
+        std::fs::write(full.join("transcript.txt"), "hi").unwrap();
+        std::fs::write(full.join("transcript.json"), "[]").unwrap();
+
+        let bare = sessions.join("bare-2");
+        std::fs::create_dir_all(&bare).unwrap();
+        let missing = root.join("gone.mkv");
+        let bare_session = serde_json::json!({ "recording_path": missing.to_string_lossy() }).to_string();
+        std::fs::write(bare.join("session.json"), &bare_session).unwrap();
+
+        let bad = sessions.join("bad name");
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(bad.join("session.json"), "{}").unwrap();
+        std::fs::create_dir_all(sessions.join("empty3")).unwrap();
+        std::fs::write(sessions.join("stray.json"), "{}").unwrap();
+
+        let mut list = list_sessions_in(&sessions).unwrap();
+        list.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(list.len(), 2, "{list:?}");
+        let (b, f) = (&list[0], &list[1]);
+        assert_eq!(f.id, "full_1");
+        assert_eq!(f.session, full_session);
+        assert_eq!(f.points.as_deref(), Some("[1]"));
+        assert_eq!(f.review.as_deref(), Some("{\"r\":1}"));
+        assert!(f.transcribed && f.partial_transcript && f.recording_exists);
+        assert_eq!(b.id, "bare-2");
+        assert_eq!(b.session, bare_session);
+        assert!(b.points.is_none() && b.review.is_none());
+        assert!(!b.transcribed && !b.partial_transcript && !b.recording_exists);
+
+        // Unparseable session.json still lists, with recording_exists = false.
+        std::fs::write(bare.join("session.json"), "not json").unwrap();
+        let list = list_sessions_in(&sessions).unwrap();
+        assert!(list.iter().any(|s| s.id == "bare-2" && !s.recording_exists));
+
+        let v = serde_json::to_value(&list[0]).unwrap();
+        let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["id", "partial_transcript", "points", "recording_exists", "review", "session", "transcribed"]
+        );
+
+        assert!(list_sessions_in(&root.join("nope")).unwrap().is_empty());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
