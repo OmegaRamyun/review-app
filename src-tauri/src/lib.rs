@@ -4,6 +4,7 @@ mod deepgram;
 mod gemini;
 mod media;
 mod openai;
+mod whisper_api;
 
 use deepgram::Word;
 use media::MediaState;
@@ -17,6 +18,7 @@ const KEYRING_USER_GEMINI: &str = "gemini";
 const KEYRING_USER_CLAUDE: &str = "claude";
 const KEYRING_USER_OPENAI: &str = "openai";
 const KEYRING_USER_OPENAI_COMPAT: &str = "openai_compat";
+const KEYRING_USER_GROQ: &str = "groq";
 const KEYRING_USER_CLOUDFLARE: &str = "cloudflare";
 /// Upper bound on system + prompt sent to the AI draft provider, in bytes.
 const AI_MAX_INPUT_BYTES: usize = 200_000;
@@ -469,6 +471,21 @@ fn clear_openai_compat_key() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_groq_key(key: String) -> Result<(), String> {
+    set_key(KEYRING_USER_GROQ, &key)
+}
+
+#[tauri::command]
+fn has_groq_key() -> Result<bool, String> {
+    has_key(KEYRING_USER_GROQ)
+}
+
+#[tauri::command]
+fn clear_groq_key() -> Result<(), String> {
+    clear_key(KEYRING_USER_GROQ)
+}
+
+#[tauri::command]
 fn set_cloudflare_key(key: String) -> Result<(), String> {
     set_key(KEYRING_USER_CLOUDFLARE, &key)
 }
@@ -484,14 +501,35 @@ fn clear_cloudflare_key() -> Result<(), String> {
 }
 
 // ---------- transcription ----------
+// One command for every API provider; the frontend passes the provider picked
+// in Settings ("local" Whisper runs in the webview and never calls this).
+// Unknown provider strings fall back to Deepgram, the original provider.
+
+/// Which backend a provider string routes to.
+#[derive(Debug, PartialEq)]
+enum TranscribeRoute {
+    Deepgram,
+    OpenAi,
+    Groq,
+}
+
+fn transcribe_route(provider: &str) -> TranscribeRoute {
+    match provider {
+        "openai" => TranscribeRoute::OpenAi,
+        "groq" => TranscribeRoute::Groq,
+        _ => TranscribeRoute::Deepgram,
+    }
+}
 
 #[tauri::command]
 async fn transcribe_chunk(
     app: AppHandle,
+    provider: Option<String>,
     audio_path: String,
     model: String,
     offset_s: f64,
 ) -> Result<Vec<Word>, String> {
+    let route = transcribe_route(provider.as_deref().unwrap_or("deepgram"));
     let root = sessions_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let root = std::fs::canonicalize(&root).map_err(|_| "no sessions directory yet".to_string())?;
@@ -499,9 +537,31 @@ async fn transcribe_chunk(
         if !audio.starts_with(&root) || !audio.is_file() {
             return Err("audio_path must be a file inside the sessions directory".into());
         }
-        let key = get_key(KEYRING_USER_DEEPGRAM, "Deepgram")?;
+        let key = match route {
+            TranscribeRoute::Deepgram => get_key(KEYRING_USER_DEEPGRAM, "Deepgram")?,
+            TranscribeRoute::OpenAi => get_key(KEYRING_USER_OPENAI, "OpenAI")?,
+            TranscribeRoute::Groq => get_key(KEYRING_USER_GROQ, "Groq")?,
+        };
         let bytes = std::fs::read(&audio).map_err(|e| format!("audio file: {e}"))?;
-        let mut words = deepgram::send(deepgram::API_BASE, &key, bytes, &model)?;
+        let mut words = match route {
+            TranscribeRoute::Deepgram => deepgram::send(deepgram::API_BASE, &key, bytes, &model)?,
+            TranscribeRoute::OpenAi => whisper_api::send(
+                whisper_api::OPENAI_BASE,
+                &key,
+                bytes,
+                &model,
+                whisper_api::OPENAI_DEFAULT_MODEL,
+                "OpenAI",
+            )?,
+            TranscribeRoute::Groq => whisper_api::send(
+                whisper_api::GROQ_BASE,
+                &key,
+                bytes,
+                &model,
+                whisper_api::GROQ_DEFAULT_MODEL,
+                "Groq",
+            )?,
+        };
         for w in &mut words {
             w.start += offset_s;
             w.end += offset_s;
@@ -624,6 +684,9 @@ pub fn run() {
             set_openai_compat_key,
             has_openai_compat_key,
             clear_openai_compat_key,
+            set_groq_key,
+            has_groq_key,
+            clear_groq_key,
             ai_draft,
             set_cloudflare_key,
             has_cloudflare_key,
@@ -652,6 +715,16 @@ mod tests {
         assert!(valid_name("shot-p0007-1762600000000.jpg"));
         for bad in ["", ".hidden", "..", "../x", "a/b", "a\\b", "C:x", &"a".repeat(65)] {
             assert!(!valid_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn transcribe_routing_defaults_to_deepgram() {
+        assert_eq!(transcribe_route("deepgram"), TranscribeRoute::Deepgram);
+        assert_eq!(transcribe_route("openai"), TranscribeRoute::OpenAi);
+        assert_eq!(transcribe_route("groq"), TranscribeRoute::Groq);
+        for other in ["", "local", "Groq", "whisper", "openai_compat"] {
+            assert_eq!(transcribe_route(other), TranscribeRoute::Deepgram, "{other:?}");
         }
     }
 

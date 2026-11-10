@@ -2,6 +2,7 @@
 // addressed by absolute path (drag-drop) and read through the `media` scheme.
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { transcribeLocal } from "./local-whisper";
 import { encodeClip, extractMicWav, grabFrame, mediaUrl, probe, sampleColors, type Probe } from "./media";
 import {
   FALLBACK_GRADIENT, clipFileName, fmtBytes, gameTrack, gradientFrom, lengthWarnings,
@@ -12,7 +13,8 @@ import {
   shotName, updatePoint, type Mode, type Point, type PointsFile,
 } from "./points";
 import {
-  chunkRanges, costCents, defaultMicTrack, fmtTime, groupLines, lineAt, type Line, type Word,
+  canResume, chunkRanges, costCents, defaultMicTrack, fmtTime, groupLines, lineAt, localModelOf, TR_META,
+  trProviderOf, type Line, type TrProvider, type Word,
 } from "./transcript";
 import {
   applyDraft, DRAFT_SYSTEM, draftPrompt, emptyReview, parseDraft, parseReview, pointsIn, renderPage,
@@ -29,6 +31,8 @@ import {
 interface MediaInfo { path: string; size_bytes: number }
 
 interface TranscriptFile {
+  /** Missing in files written before the provider dropdown: those were Deepgram. */
+  provider?: TrProvider;
   model: string;
   duration: number;
   chunks: { start: number; end: number; audio_path: string }[];
@@ -47,32 +51,86 @@ const LS_EVENT = "ra.event";
 const LS_DEMO = "ra.demoDay";
 
 // ---------- settings ----------
-const modelInput = $<HTMLInputElement>("dg-model");
-modelInput.value = localStorage.getItem(LS_MODEL) ?? "";
-modelInput.addEventListener("change", () => localStorage.setItem(LS_MODEL, modelInput.value.trim()));
-const model = () => modelInput.value.trim() || "nova-3";
-
+// Transcription provider: same pattern as the AI draft block below. Provider
+// in ra.trProvider, model per provider in ra.trModel.<provider>; API keys live
+// in the OS keychain (OpenAI shares the AI draft feature's slot). "local" runs
+// Whisper on-device in this webview: no key, no backend call.
+const LS_TR_PROVIDER = "ra.trProvider";
+const LS_TR_MODEL_PREFIX = "ra.trModel.";
+// One-time migration: the model saved under the old Deepgram-only key moves over.
+if (localStorage.getItem(LS_TR_MODEL_PREFIX + "deepgram") === null) {
+  const old = localStorage.getItem(LS_MODEL);
+  if (old) localStorage.setItem(LS_TR_MODEL_PREFIX + "deepgram", old);
+}
+const trProviderSelect = $<HTMLSelectElement>("tr-provider");
+const trModelInput = $<HTMLInputElement>("tr-model");
+const trLocalModel = $<HTMLSelectElement>("tr-local-model");
+const trProvider = (): TrProvider => trProviderOf(trProviderSelect.value);
+/** The model the next transcription will use for the selected provider. */
+const model = () => {
+  const p = trProvider();
+  if (p === "local") return localModelOf(trLocalModel.value);
+  return trModelInput.value.trim() || TR_META[p].defaultModel;
+};
+const hasTrKey = (p: TrProvider) =>
+  p === "local" ? Promise.resolve(true) : invoke<boolean>(`has_${p}_key`).catch(() => false);
+function refreshTrRows() {
+  const p = trProvider();
+  const meta = TR_META[p];
+  $("tr-key-rows").hidden = p === "local";
+  $("tr-local-rows").hidden = p !== "local";
+  if (p === "local") {
+    trLocalModel.value = localModelOf(localStorage.getItem(LS_TR_MODEL_PREFIX + "local"));
+    return;
+  }
+  $("tr-key-label").textContent = `${meta.name} API key`;
+  const link = $<HTMLAnchorElement>("tr-key-link");
+  link.href = meta.keyLink;
+  link.textContent = meta.keyLinkText;
+  $("tr-key-shared").hidden = p !== "openai";
+  $("tr-model-label").textContent = `${meta.name} model`;
+  trModelInput.placeholder = meta.defaultModel;
+  trModelInput.value = localStorage.getItem(LS_TR_MODEL_PREFIX + p) ?? "";
+  trModelInput.dataset.provider = p;
+  void refreshKeyStatus();
+}
 async function refreshKeyStatus() {
-  const has = await invoke<boolean>("has_deepgram_key").catch(() => false);
-  $("dg-status").textContent = has ? "key stored in OS keychain" : "no key stored";
+  const p = trProvider();
+  if (p === "local") return;
+  const has = await hasTrKey(p);
+  if (trProvider() !== p) return; // switched while the keychain answered
+  $("tr-status").textContent = has ? "key stored in OS keychain" : "no key stored";
   if (!has) $<HTMLDetailsElement>("settings").open = true;
 }
-$("dg-save").addEventListener("click", async () => {
-  const el = $<HTMLInputElement>("dg-key");
+trProviderSelect.value = trProviderOf(localStorage.getItem(LS_TR_PROVIDER));
+trProviderSelect.addEventListener("change", () => {
+  localStorage.setItem(LS_TR_PROVIDER, trProvider());
+  refreshTrRows();
+});
+// Save under the provider the input was filled for, not the dropdown's current value:
+// a blur-change can land after the dropdown already moved on.
+trModelInput.addEventListener("change", () => {
+  const p = trProviderOf(trModelInput.dataset.provider);
+  if (p !== "local") localStorage.setItem(LS_TR_MODEL_PREFIX + p, trModelInput.value.trim());
+});
+trLocalModel.addEventListener("change", () => localStorage.setItem(LS_TR_MODEL_PREFIX + "local", localModelOf(trLocalModel.value)));
+$("tr-save").addEventListener("click", async () => {
+  const el = $<HTMLInputElement>("tr-key");
   try {
-    await invoke("set_deepgram_key", { key: el.value });
+    await invoke(`set_${trProvider()}_key`, { key: el.value });
     el.value = "";
   } catch (e) {
-    $("dg-status").textContent = String(e);
+    $("tr-status").textContent = String(e);
     return;
   }
   void refreshKeyStatus();
+  void refreshAiStatus(); // the OpenAI slot is shared with AI draft
 });
-$("dg-clear").addEventListener("click", async () => {
-  await invoke("clear_deepgram_key").catch(() => {});
+$("tr-clear").addEventListener("click", async () => {
+  await invoke(`clear_${trProvider()}_key`).catch(() => {});
   void refreshKeyStatus();
+  void refreshAiStatus();
 });
-void refreshKeyStatus();
 
 // AI draft provider: one keychain slot per provider; the key/model/base-URL
 // rows follow the dropdown. Provider choice + per-provider model + base URL
@@ -136,12 +194,15 @@ $("ai-save").addEventListener("click", async () => {
     return;
   }
   void refreshAiStatus();
+  void refreshKeyStatus(); // the OpenAI slot is shared with transcription
 });
 $("ai-clear").addEventListener("click", async () => {
   await invoke(`clear_${aiProvider()}_key`).catch(() => {});
   void refreshAiStatus();
+  void refreshKeyStatus();
 });
 refreshAiRows();
+refreshTrRows();
 
 // ---------- screens ----------
 type Screen = "library" | "import" | "transcribe" | "scrub" | "assemble" | "publish";
@@ -495,19 +556,20 @@ function showImport(error = "") {
 // ---------- 2. Transcribe ----------
 $("b-transcribe").addEventListener("click", async () => {
   if (!media || !probed || !session) return;
-  if (!(await invoke<boolean>("has_deepgram_key").catch(() => false))) {
-    $("import-error").textContent = "Enter your Deepgram API key in Settings first.";
+  const provider = trProvider();
+  if (!(await hasTrKey(provider))) {
+    $("import-error").textContent = `Enter your ${TR_META[provider].name} API key in Settings first.`;
     $<HTMLDetailsElement>("settings").open = true;
     return;
   }
   const mic = Number(document.querySelector<HTMLInputElement>('input[name="mic"]:checked')?.value ?? 2);
   localStorage.setItem(LS_MIC, String(mic));
-  // Resume only what was transcribed from the same track with the same model; anything else starts over.
-  const resume = transcript && transcript.chunks.length && session.mic_track === mic && transcript.model === model();
+  // Resume only what was transcribed by the same provider + model from the same track; anything else starts over.
+  const resume = canResume(transcript, session.mic_track, provider, model(), mic);
   session.mic_track = mic;
   session.duration = probed.duration;
   await saveSessionObj(session);
-  if (!resume) transcript = { model: model(), duration: probed.duration, chunks: [], words: [] };
+  if (!resume) transcript = { provider, model: model(), duration: probed.duration, chunks: [], words: [] };
   show("transcribe");
   void runTranscription();
 });
@@ -517,7 +579,9 @@ $("t-retry").addEventListener("click", () => void runTranscription());
 async function runTranscription() {
   if (!session || !probed || !transcript) return;
   const s = session, p = probed, tr = transcript;
-  const ranges = chunkRanges(p.duration);
+  const provider = trProviderOf(tr.provider);
+  const local = provider === "local";
+  const ranges = chunkRanges(p.duration, TR_META[provider].chunkSeconds);
   const status = $("t-status"), bar = $<HTMLProgressElement>("t-bar");
   $("t-error").textContent = "";
   $("t-retry").hidden = true;
@@ -530,11 +594,16 @@ async function runTranscription() {
       const wav = await extractMicWav(p.input, s.mic_track, r.start, r.end, (x) => {
         bar.value = (i + x * 0.5) / ranges.length;
       });
-      status.textContent = `Uploading + transcribing — ${part}`;
+      status.textContent = local ? `Saving mic audio — ${part}` : `Uploading + transcribing — ${part}`;
       const audioPath = await invoke<string>("save_session_bytes", new Uint8Array(wav), {
         headers: { "x-session": s.id, "x-name": `mic-${String(i).padStart(3, "0")}.wav` },
       });
-      const words = await invoke<Word[]>("transcribe_chunk", { audioPath, model: tr.model, offsetS: r.start });
+      const words = local
+        ? await transcribeLocal(wav, tr.model, r.start, (msg, x) => {
+          status.textContent = `${msg} — ${part}`;
+          bar.value = (i + 0.5 + x * 0.5) / ranges.length;
+        })
+        : await invoke<Word[]>("transcribe_chunk", { provider, audioPath, model: tr.model, offsetS: r.start });
       tr.words.push(...words);
       tr.chunks.push({ ...r, audio_path: audioPath });
       bar.value = (i + 1) / ranges.length;
@@ -547,8 +616,13 @@ async function runTranscription() {
   }
   const text = groupLines(tr.words).map((l) => `[${fmtTime(l.start)}] ${l.text}`).join("\n");
   await invoke("save_session_file", { id: s.id, name: "transcript.txt", contents: text });
-  status.textContent = `Done — ${tr.words.length} words, ${fmtTime(p.duration)} of mic audio, ` +
-    `≈ ${costCents(p.duration).toFixed(1)}¢ at the ${tr.model} list price.`;
+  const meta = TR_META[provider];
+  // Price is known for each provider's default model (Deepgram keeps its old always-shown line).
+  const price = local ? "on-device, no cost."
+    : provider === "deepgram" || tr.model === meta.defaultModel
+      ? `≈ ${costCents(p.duration, meta.usdPerMinute).toFixed(1)}¢ at the ${tr.model} list price.`
+      : `${meta.name} ${tr.model}.`;
+  status.textContent = `Done — ${tr.words.length} words, ${fmtTime(p.duration)} of mic audio, ${price}`;
   $("t-next").hidden = false;
 }
 $("t-next").addEventListener("click", () => {

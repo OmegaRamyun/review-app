@@ -17,13 +17,35 @@
       </div>
       <details id="settings">
         <summary>Settings</summary>
-        <label>Deepgram API key
-          <input id="dg-key" type="password" autocomplete="off" placeholder="paste once — stored in the OS keychain" />
+        <label>Transcription provider
+          <select id="tr-provider">
+            <option value="deepgram">Deepgram</option>
+            <option value="openai">OpenAI</option>
+            <option value="groq">Groq</option>
+            <option value="local">Local Whisper — on-device, no key</option>
+          </select>
         </label>
-        <button id="dg-save">Save key</button>
-        <button id="dg-clear">Forget key</button>
-        <span id="dg-status"></span>
-        <label>Deepgram model <input id="dg-model" type="text" placeholder="nova-3" /></label>
+        <div id="tr-key-rows">
+          <label><span id="tr-key-label">Deepgram API key</span>
+            <a id="tr-key-link" href="https://console.deepgram.com/" target="_blank" rel="noreferrer">get a key ↗</a>
+            <input id="tr-key" type="password" autocomplete="off" placeholder="paste once — stored in the OS keychain" />
+          </label>
+          <span id="tr-key-shared" class="hint" hidden>Same key as the OpenAI AI draft provider — one key, both features.</span>
+          <button id="tr-save">Save key</button>
+          <button id="tr-clear">Forget key</button>
+          <span id="tr-status"></span>
+          <label><span id="tr-model-label">Deepgram model</span> <input id="tr-model" type="text" placeholder="nova-3" /></label>
+        </div>
+        <div id="tr-local-rows" hidden>
+          <label>Local Whisper model
+            <select id="tr-local-model">
+              <option value="Xenova/whisper-tiny">whisper-tiny (~70 MB download, fastest)</option>
+              <option value="Xenova/whisper-base">whisper-base (~140 MB download)</option>
+              <option value="Xenova/whisper-small">whisper-small (~510 MB download, most accurate, slowest)</option>
+            </select>
+          </label>
+          <p class="hint">The model downloads on first use (then stays cached) and runs on-device — no key, no upload.</p>
+        </div>
         <hr />
         <label>AI draft provider (Assemble screen — optional)
           <select id="ai-provider">
